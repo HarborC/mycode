@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from computer._run_common import run_precompute
-from adapters.co3dv2 import Co3Dv2Adapter
+from src.datasets.co3dv2 import Co3Dv2Dataset
 
 
 def main() -> None:
@@ -32,7 +32,7 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
-    adapter = Co3Dv2Adapter(root=args.root)
+    adapter = Co3Dv2Dataset(root=args.root)
     output_root = Path(args.output_root) if args.output_root else Path(args.root)
 
     run_precompute(

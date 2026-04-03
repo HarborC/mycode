@@ -11,7 +11,7 @@ Original .npy (pickle dict) contains:
   metadata      dict
   camera        dict
 
-We store only the fields used by KubricAdapter.load_clip():
+We store only the fields used by KubricDataset.load_clip():
   trajs_2d      [T, N, 2]  (transposed from coords)
   coords_depth  [T, N]     (transposed)
   visibility    [T, N]     (transposed)

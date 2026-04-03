@@ -7,10 +7,11 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from PIL import Image
 
-from .base import BaseAdapter, UnifiedClip
+from src.datasets.base import BaseDataset
+from src.datasets.types import UnifiedClip
 
 
-class KubricAdapter(BaseAdapter):
+class KubricDataset(BaseDataset):
     """
     Kubric adapter for extracted scene format.
 

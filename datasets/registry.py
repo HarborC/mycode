@@ -15,46 +15,46 @@ from __future__ import annotations
 
 from typing import Type
 
-from datasets.adapters.base import BaseAdapter
-from datasets.adapters.blendedmvs import BlendedMVSAdapter
-from datasets.adapters.co3dv2 import Co3Dv2Adapter
-from datasets.adapters.dynamic_replica import DynamicReplicaAdapter
-from datasets.adapters.kubric import KubricAdapter
-from datasets.adapters.mvssynth import MVSSynthAdapter
-from datasets.adapters.pointodyssey import PointOdysseyAdapter
-from datasets.adapters.scannet import ScanNetAdapter
-from datasets.adapters.TartanAir import TartanAirAdapter
-from datasets.adapters.VirtualKitti import VKITTI2Adapter
+from src.datasets.base import BaseDataset
+from src.datasets.blendedmvs import BlendedMVSDataset
+from src.datasets.co3dv2 import Co3Dv2Dataset
+from src.datasets.dynamic_replica import DynamicReplicaDataset
+from src.datasets.kubric import KubricDataset
+from src.datasets.mvssynth import MVSSynthDataset
+from src.datasets.pointodyssey import PointOdysseyDataset
+from src.datasets.scannet import ScanNetDataset
+from src.datasets.tartanair import TartanAirDataset
+from src.datasets.virtual_kitti import VKITTI2Dataset
 
 
-# Dataset name -> Adapter class mapping
-DATASET_REGISTRY: dict[str, Type[BaseAdapter]] = {
-    "pointodyssey": PointOdysseyAdapter,
-    "scannet": ScanNetAdapter,
-    "co3dv2": Co3Dv2Adapter,
-    "kubric": KubricAdapter,
-    "blendedmvs": BlendedMVSAdapter,
-    "mvssynth": MVSSynthAdapter,
-    "dynamic_replica": DynamicReplicaAdapter,
-    "tartanair": TartanAirAdapter,
-    "vkitti2": VKITTI2Adapter,
+# Dataset name -> Dataset class mapping
+DATASET_REGISTRY: dict[str, Type[BaseDataset]] = {
+    "pointodyssey": PointOdysseyDataset,
+    "scannet": ScanNetDataset,
+    "co3dv2": Co3Dv2Dataset,
+    "kubric": KubricDataset,
+    "blendedmvs": BlendedMVSDataset,
+    "mvssynth": MVSSynthDataset,
+    "dynamic_replica": DynamicReplicaDataset,
+    "tartanair": TartanAirDataset,
+    "vkitti2": VKITTI2Dataset,
 }
 
-# Lazy-loaded adapters (requires special dependencies)
+# Lazy-loaded datasets (requires special dependencies)
 LAZY_ADAPTERS = {
-    "waymo": ("datasets.adapters.Waymo", "WaymoAdapter"),  # requires tensorflow
+    "waymo": ("src.datasets.waymo", "WaymoDataset"),  # requires tensorflow
 }
 
 
-def register_dataset(name: str, adapter_class: Type[BaseAdapter]) -> None:
-    """Register a new dataset adapter."""
+def register_dataset(name: str, adapter_class: Type[BaseDataset]) -> None:
+    """Register a new dataset."""
     if name in DATASET_REGISTRY:
         raise ValueError(f"Dataset '{name}' already registered")
     DATASET_REGISTRY[name] = adapter_class
 
 
-def _load_lazy_adapter(name: str) -> Type[BaseAdapter]:
-    """Load a lazy adapter on demand."""
+def _load_lazy_adapter(name: str) -> Type[BaseDataset]:
+    """Load a lazy dataset on demand."""
     if name not in LAZY_ADAPTERS:
         return None
 
@@ -72,7 +72,7 @@ def _load_lazy_adapter(name: str) -> Type[BaseAdapter]:
         )
 
 
-def create_adapter(name: str, **kwargs) -> BaseAdapter:
+def create_adapter(name: str, **kwargs) -> BaseDataset:
     """
     Create an adapter instance by name.
 
@@ -81,10 +81,10 @@ def create_adapter(name: str, **kwargs) -> BaseAdapter:
         **kwargs: Arguments passed to adapter constructor
 
     Returns:
-        Adapter instance
+        Dataset instance
 
     Example:
-        adapter = create_adapter('pointodyssey', root='/data/pointodyssey', split='train')
+        adapter = create_adapter('pointodyssey', root='/data/pointodyssey', split='train')  # noqa: E501
     """
     # Check if already loaded
     if name in DATASET_REGISTRY:
@@ -106,7 +106,7 @@ def list_datasets() -> list[str]:
     return list(DATASET_REGISTRY.keys()) + list(LAZY_ADAPTERS.keys())
 
 
-def get_adapter_class(name: str) -> Type[BaseAdapter]:
+def get_adapter_class(name: str) -> Type[BaseDataset]:
     """Get adapter class by name."""
     if name in DATASET_REGISTRY:
         return DATASET_REGISTRY[name]

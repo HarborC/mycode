@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
+
+from src.datasets.types import UnifiedClip
 
 
 def load_precomputed_fast(
@@ -62,34 +64,7 @@ def load_precomputed_fast(
     return None
 
 
-@dataclass
-class UnifiedClip:
-    dataset_name: str
-    sequence_name: str
-    frame_paths: Optional[list[str]]
-    images: list[np.ndarray]                  # [T][H,W,3]
-    depths: Optional[list[np.ndarray]]        # [T][H,W]
-    normals: Optional[list[np.ndarray]]       # [T][H,W,3]
-    trajs_2d: Optional[np.ndarray]            # [T,N,2]
-    trajs_3d_world: Optional[np.ndarray]      # [T,N,3]
-    valids: Optional[np.ndarray]              # [T,N]
-    visibs: Optional[np.ndarray]              # [T,N]
-    intrinsics: np.ndarray                    # [T,3,3]
-    extrinsics: np.ndarray                    # [T,4,4]
-    flows: Optional[list[np.ndarray]] = None  # [T][H,W,2], optical flow
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def num_frames(self) -> int:
-        return len(self.images)
-
-    @property
-    def image_size(self) -> tuple[int, int]:
-        h, w = self.images[0].shape[:2]
-        return h, w
-
-
-class BaseAdapter(ABC):
+class BaseDataset(ABC):
     dataset_name: str = "base"
 
     @abstractmethod
@@ -113,7 +88,7 @@ class BaseAdapter(ABC):
 
         Subclasses should override this if they can return num_frames directly
         from their in-memory index without loading annotation files.
-        Default falls back to get_sequence_info (may be slow for some adapters).
+        Default falls back to get_sequence_info (may be slow for some datasets).
         """
         return self.get_sequence_info(sequence_name)['num_frames']
 

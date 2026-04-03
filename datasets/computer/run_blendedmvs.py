@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from computer._run_common import run_precompute
-from adapters.blendedmvs import BlendedMVSAdapter
+from src.datasets.blendedmvs import BlendedMVSDataset
 
 
 def main() -> None:
@@ -32,7 +32,7 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
-    adapter = BlendedMVSAdapter(root=args.root, verbose=False)
+    adapter = BlendedMVSDataset(root=args.root, verbose=False)
     output_root = Path(args.output_root) if args.output_root else Path(args.root)
 
     run_precompute(

@@ -8,7 +8,8 @@ from typing import Any, Optional
 import numpy as np
 from PIL import Image
 
-from .base import BaseAdapter, UnifiedClip
+from src.datasets.base import BaseDataset
+from src.datasets.types import UnifiedClip
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +167,7 @@ class _SequenceRecord:
 _CAM_FILENAME_RE = re.compile(r"^(\d+)_cam\.txt$")
 
 
-class BlendedMVSAdapter(BaseAdapter):
+class BlendedMVSDataset(BaseDataset):
     """Dataset adapter for BlendedMVS.
 
     Expected dataset layout::
@@ -276,13 +277,13 @@ class BlendedMVSAdapter(BaseAdapter):
 
         if self.verbose:
             print(
-                f"[BlendedMVSAdapter] split={self.split!r}, "
+                f"[BlendedMVSDataset] split={self.split!r}, "
                 f"num_sequences={len(self._records)}, "
                 f"use_masked={self.use_masked}"
             )
 
     # ------------------------------------------------------------------
-    # BaseAdapter interface
+    # BaseDataset interface
     # ------------------------------------------------------------------
 
     def __len__(self) -> int:
@@ -419,7 +420,7 @@ class BlendedMVSAdapter(BaseAdapter):
 
     def _load_precomputed(self, sequence_name: str, frame_indices: list[int]) -> Optional[dict]:
         """Load precomputed data for frame_indices. Prefers .h5 over .npz."""
-        from datasets.adapters.base import load_precomputed_fast
+        from src.datasets.base import load_precomputed_fast
         path = self.precompute_root / sequence_name / "precomputed.npz"
         h5_path = path.with_suffix('.h5')
         if not path.exists() and not h5_path.exists():
@@ -632,10 +633,10 @@ class BlendedMVSAdapter(BaseAdapter):
                     raise
                 skipped.append(f"{scene_id}: {exc}")
                 if self.verbose:
-                    print(f"[BlendedMVSAdapter][WARN] skip {scene_id}: {exc}")
+                    print(f"[BlendedMVSDataset][WARN] skip {scene_id}: {exc}")
 
         if self.verbose and skipped:
-            print(f"[BlendedMVSAdapter] skipped {len(skipped)} scenes (non-strict mode)")
+            print(f"[BlendedMVSDataset] skipped {len(skipped)} scenes (non-strict mode)")
 
         return records
 
@@ -699,3 +700,20 @@ class BlendedMVSAdapter(BaseAdapter):
     def _read_image_size(path: Path) -> tuple[int, int]:
         img = Image.open(path)
         return img.height, img.width
+
+if __name__ == "__main__":
+    DATA_ROOT = "/home/ubuntu/datasets/BlendedMVS"
+    PRECOMPUTED_ROOT = "/home/ubuntu/datasets/BlendedMVS_precomputed"
+    CACHE_DIR = "/home/ubuntu/datasets/index_cache"
+
+    print("\n=== 1. Dataset construction ===")
+    dataset = BlendedMVSDataset(
+        root=DATA_ROOT,
+        split="train",
+        use_masked=False,
+        strict=False,
+        verbose=True,
+        precompute_root=PRECOMPUTED_ROOT,
+        cache_dir=CACHE_DIR,
+    )
+    print(f"Dataset stats: {len(dataset)} sequences")

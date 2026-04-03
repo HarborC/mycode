@@ -24,7 +24,8 @@ def check_layer1_adapters():
     print("="*60)
 
     from datasets.registry import DATASET_REGISTRY, list_datasets
-    from datasets.adapters.base import BaseAdapter, UnifiedClip
+    from src.datasets.base import BaseDataset
+from src.datasets.types import UnifiedClip
 
     # 检查新增的三个adapter是否已注册
     registered = list_datasets()
@@ -37,12 +38,12 @@ def check_layer1_adapters():
         print(f"⚠️  新adapter未注册: {missing}")
         print("   需要在 registry.py 中添加")
 
-    # 检查所有adapter是否继承BaseAdapter
+    # 检查所有adapter是否继承BaseDataset
     print("\n检查adapter基类继承:")
     for name, adapter_class in DATASET_REGISTRY.items():
-        is_base = issubclass(adapter_class, BaseAdapter)
+        is_base = issubclass(adapter_class, BaseDataset)
         status = "✓" if is_base else "✗"
-        print(f"  {status} {name}: {'继承BaseAdapter' if is_base else '未继承BaseAdapter'}")
+        print(f"  {status} {name}: {'继承BaseDataset' if is_base else '未继承BaseDataset'}")
 
         if not is_base:
             return False

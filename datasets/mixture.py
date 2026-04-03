@@ -27,7 +27,7 @@ from __future__ import annotations
 import random as _random_module
 from typing import Optional
 
-from datasets.adapters.base import BaseAdapter
+from src.datasets.base import BaseDataset
 from datasets.query_builder import D4RTQueryBuilder, QuerySample
 from datasets.sampling import DatasetSampler
 from datasets.transforms import GeometryTransformPipeline
@@ -111,7 +111,7 @@ class MixtureDataset:
 
     def __init__(
         self,
-        adapters: list[BaseAdapter],
+        adapters: list[BaseDataset],
         dataset_weights: Optional[list[float]] = None,
         clip_len: int = 8,
         img_size: int = 256,

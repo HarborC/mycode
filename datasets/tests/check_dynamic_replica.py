@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validation script for DynamicReplicaAdapter.
+"""Validation script for DynamicReplicaDataset.
 
 Checks performed
 ----------------
@@ -53,8 +53,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from datasets.adapters.dynamic_replica import DynamicReplicaAdapter  # noqa: E402
-from datasets.adapters.base import UnifiedClip                       # noqa: E402
+from src.datasets.dynamic_replica import DynamicReplicaDataset  # noqa: E402
+from src.datasets.types import UnifiedClip                         # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +63,7 @@ from datasets.adapters.base import UnifiedClip                       # noqa: E40
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Validate DynamicReplicaAdapter against the D4RT unified schema.",
+        description="Validate DynamicReplicaDataset against the D4RT unified schema.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--data-root", required=True,
@@ -428,7 +428,7 @@ def check_right_camera_no_tracks(c: _Checker, clip: UnifiedClip) -> None:
 
 def check_boundary_frames(
     c: _Checker,
-    adapter: DynamicReplicaAdapter,
+    adapter: DynamicReplicaDataset,
     seq_name: str,
 ) -> None:
     """Load a 2-frame clip with first and last indices."""
@@ -443,7 +443,7 @@ def check_boundary_frames(
 
 def check_error_handling(
     c: _Checker,
-    adapter: DynamicReplicaAdapter,
+    adapter: DynamicReplicaDataset,
     seq_name: str,
 ) -> None:
     """Verify expected exceptions for invalid inputs."""
@@ -474,7 +474,7 @@ def check_error_handling(
 
 def check_sanity_check_return(
     c: _Checker,
-    adapter: DynamicReplicaAdapter,
+    adapter: DynamicReplicaDataset,
     seq_name: str,
 ) -> None:
     """Call adapter.sanity_check() and validate the return structure."""
@@ -500,7 +500,7 @@ def check_sanity_check_return(
 # ---------------------------------------------------------------------------
 
 def validate_sequence(
-    adapter: DynamicReplicaAdapter,
+    adapter: DynamicReplicaDataset,
     seq_name: str,
     clip_len: int,
     reproj_pixels: int,
@@ -564,7 +564,7 @@ def run(args: argparse.Namespace) -> tuple[int, int]:
     print(f"{'='*60}")
 
     try:
-        adapter = DynamicReplicaAdapter(
+        adapter = DynamicReplicaDataset(
             root=args.data_root,
             split=args.split,
             load_trajectories=not args.no_trajectories,

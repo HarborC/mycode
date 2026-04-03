@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from datasets.adapters.kubric import KubricAdapter
+from src.datasets.kubric import KubricDataset
 from datasets.mixture import MixtureDataset
 
 
@@ -16,7 +16,7 @@ def main():
     print("=" * 80)
 
     # Initialize adapter
-    kubric = KubricAdapter(root="/data2/d4rt/datasets/kubric")
+    kubric = KubricDataset(root="/data2/d4rt/datasets/kubric")
     print(f"✓ Kubric: {len(kubric)} sequences")
 
     # Create mixture dataset (single dataset)

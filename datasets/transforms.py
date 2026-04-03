@@ -23,7 +23,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from datasets.adapters.base import UnifiedClip
+from src.datasets.types import UnifiedClip
 
 
 # ---------------------------------------------------------------------------

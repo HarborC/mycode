@@ -66,9 +66,9 @@ def test_dataloader_speed_single_dataset():
     print("="*70)
 
     try:
-        from datasets.adapters.pointodyssey import PointOdysseyAdapter
+        from src.datasets.pointodyssey import PointOdysseyDataset
 
-        adapter = PointOdysseyAdapter(
+        adapter = PointOdysseyDataset(
             root='/data2/d4rt/datasets/PointOdyssey',
             split='train',
             verbose=False

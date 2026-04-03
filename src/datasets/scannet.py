@@ -8,10 +8,11 @@ from typing import Any, Optional
 import numpy as np
 from PIL import Image
 
-from .base import BaseAdapter, UnifiedClip
+from src.datasets.base import BaseDataset
+from src.datasets.types import UnifiedClip
 
 
-class ScanNetAdapter(BaseAdapter):
+class ScanNetDataset(BaseDataset):
     """
     ScanNet adapter.
 
@@ -230,7 +231,7 @@ class ScanNetAdapter(BaseAdapter):
 
     def _load_precomputed(self, sequence_name: str, frame_indices: list[int]) -> Optional[dict]:
         """Load precomputed data for frame_indices. Prefers .h5 over .npz."""
-        from datasets.adapters.base import load_precomputed_fast
+        from src.datasets.base import load_precomputed_fast
         path = self.precompute_root / sequence_name / "precomputed.npz"
         h5_path = path.with_suffix('.h5')
         if not path.exists() and not h5_path.exists():
@@ -363,7 +364,7 @@ class ScanNetAdapter(BaseAdapter):
             raise FileNotFoundError(f"[{sequence_name}] missing depths dir: {scene_dir / 'depths'}")
         if not (scene_dir / "metadata.json").exists():
             raise FileNotFoundError(f"[{sequence_name}] missing metadata.json: {scene_dir / 'metadata.json'}")
-        
+
     def _check_indices(self, frame_indices: list[int], num_frames: int, sequence_name: str) -> None:
         if len(frame_indices) == 0:
             raise ValueError("frame_indices is empty")

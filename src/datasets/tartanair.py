@@ -8,7 +8,8 @@ from typing import Any, Optional
 import cv2
 import numpy as np
 
-from .base import BaseAdapter, UnifiedClip
+from src.datasets.base import BaseDataset
+from src.datasets.types import UnifiedClip
 
 
 def quat_to_rotation_matrix(quat):
@@ -21,7 +22,7 @@ def quat_to_rotation_matrix(quat):
     ], dtype=np.float32)
 
 
-class TartanAirAdapter(BaseAdapter):
+class TartanAirDataset(BaseDataset):
     dataset_name: str = "tartanair"
 
     def __init__(
@@ -63,7 +64,7 @@ class TartanAirAdapter(BaseAdapter):
             raise RuntimeError(f"No valid TartanAir sequences found under {self.root}")
 
         if self.verbose:
-            print(f"[TartanAirAdapter] split={self.split}, camera={self.camera}, "
+            print(f"[TartanAirDataset] split={self.split}, camera={self.camera}, "
                   f"num_sequences={len(self.sequences)}, "
                   f"precompute={'yes' if self.precompute_root else 'no'}")
 
@@ -87,7 +88,7 @@ class TartanAirAdapter(BaseAdapter):
         """Load precomputed normals/tracks for frame_indices. Prefers .h5 over .npz."""
         if self.precompute_root is None:
             return None
-        from datasets.adapters.base import load_precomputed_fast
+        from src.datasets.base import load_precomputed_fast
         cache_path = self.precompute_root / sequence_name / "precomputed.npz"
         h5_path = cache_path.with_suffix('.h5')
         if not cache_path.exists() and not h5_path.exists():
@@ -96,7 +97,7 @@ class TartanAirAdapter(BaseAdapter):
             return load_precomputed_fast(cache_path, frame_indices)
         except Exception as e:
             if self.verbose:
-                print(f"[TartanAirAdapter] Warning: failed to load precomputed cache "
+                print(f"[TartanAirDataset] Warning: failed to load precomputed cache "
                       f"for {sequence_name}: {e}")
             return None
 
@@ -217,7 +218,7 @@ class TartanAirAdapter(BaseAdapter):
                 has_precomputed = True
             except Exception as e:
                 if self.verbose:
-                    print(f"[TartanAirAdapter] Warning: precomputed indexing failed "
+                    print(f"[TartanAirDataset] Warning: precomputed indexing failed "
                           f"for {sequence_name}: {e}")
 
         return UnifiedClip(

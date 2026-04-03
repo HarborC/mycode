@@ -19,10 +19,10 @@ def show_layer1_output():
     print("第1层：Dataset Adapter 输出 (UnifiedClip)")
     print("="*70)
 
-    from datasets.adapters.pointodyssey import PointOdysseyAdapter
+    from src.datasets.pointodyssey import PointOdysseyDataset
 
     # 创建adapter
-    adapter = PointOdysseyAdapter(
+    adapter = PointOdysseyDataset(
         root='/data2/d4rt/datasets/PointOdyssey',
         split='train',
         verbose=False

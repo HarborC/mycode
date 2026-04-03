@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # /data2/d4rt/code
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # /data2/d4rt/code/datasets
 
 from computer._run_common import run_precompute
-from adapters.scannet import ScanNetAdapter
+from src.datasets.scannet import ScanNetDataset
 
 
 def main() -> None:
@@ -33,7 +33,7 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
-    adapter = ScanNetAdapter(root=args.root)
+    adapter = ScanNetDataset(root=args.root)
     output_root = Path(args.output_root) if args.output_root else Path(args.root)
 
     run_precompute(

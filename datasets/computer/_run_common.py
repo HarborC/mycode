@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from computer.depth_to_normals import compute_normals_sequence
 from computer.depth_to_tracks import compute_tracks
-from adapters.base import BaseAdapter
+from src.datasets.base import BaseDataset
 
 
 # --------------------------------------------------------------------------- #
@@ -90,7 +90,7 @@ def _process_sequence(args: tuple) -> tuple[str, str | None]:
 # --------------------------------------------------------------------------- #
 
 def run_precompute(
-    adapter: BaseAdapter,
+    adapter: BaseDataset,
     output_root: Path,
     num_points: int = 8000,
     workers: int = 4,
@@ -100,7 +100,7 @@ def run_precompute(
     Run precomputation for all sequences in an adapter.
 
     Args:
-        adapter:     Any BaseAdapter instance.
+        adapter:     Any BaseDataset instance.
         output_root: Directory where precomputed.npz files will be written.
                      Structure: output_root / <sequence_name> / precomputed.npz
         num_points:  Number of track points per sequence.
@@ -153,7 +153,7 @@ def run_precompute(
 # Adapter state serialisation (for subprocess pickling)
 # --------------------------------------------------------------------------- #
 
-def _make_adapter_state(adapter: BaseAdapter) -> tuple:
+def _make_adapter_state(adapter: BaseDataset) -> tuple:
     """
     Return (adapter_class, kwargs_dict) so a subprocess can re-instantiate.
     Covers the four supported adapters.
@@ -161,46 +161,46 @@ def _make_adapter_state(adapter: BaseAdapter) -> tuple:
     cls = type(adapter)
     name = cls.__name__
 
-    if name == "ScanNetAdapter":
+    if name == "ScanNetDataset":
         return cls, {
             "root": str(adapter.root),
             "depth_scale": adapter.depth_scale,
             "default_pose_convention": adapter.default_pose_convention,
         }
-    elif name == "Co3Dv2Adapter":
+    elif name == "Co3Dv2Dataset":
         return cls, {
             "root": str(adapter.root),
             "categories": adapter.categories if hasattr(adapter, "categories") else None,
             "subset_name": adapter.subset_name if hasattr(adapter, "subset_name") else "fewview_train",
             "split": adapter.split if hasattr(adapter, "split") else "train",
         }
-    elif name == "BlendedMVSAdapter":
+    elif name == "BlendedMVSDataset":
         return cls, {
             "root": str(adapter.root),
             "split": adapter.split if hasattr(adapter, "split") else "train",
             "use_masked": adapter.use_masked if hasattr(adapter, "use_masked") else False,
             "verbose": False,
         }
-    elif name == "MVSSynthAdapter":
+    elif name == "MVSSynthDataset":
         return cls, {
             "root": str(adapter.root),
             "verbose": False,
         }
-    elif name == "TartanAirAdapter":
+    elif name == "TartanAirDataset":
         return cls, {
             "root": str(adapter.root),
             "split": adapter.split if hasattr(adapter, "split") else "train",
             "camera": adapter.camera if hasattr(adapter, "camera") else "left",
             "verbose": False,
         }
-    elif name == "VKITTI2Adapter":
+    elif name == "VKITTI2Dataset":
         return cls, {
             "root": str(adapter.root),
             "split": adapter.split if hasattr(adapter, "split") else "train",
             "camera": adapter.camera if hasattr(adapter, "camera") else "Camera_0",
             "verbose": False,
         }
-    elif name == "WaymoAdapter":
+    elif name == "WaymoDataset":
         # Waymo is TFRecord-based; disable on-the-fly RAFT flow for precompute
         return cls, {
             "root": str(adapter.root),

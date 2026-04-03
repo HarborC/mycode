@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validation script for Co3Dv2Adapter.
+"""Validation script for Co3Dv2Dataset.
 
 Checks performed
 ----------------
@@ -53,8 +53,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from datasets.adapters.co3dv2 import Co3Dv2Adapter, ALL_CATEGORIES  # noqa: E402
-from datasets.adapters.base import UnifiedClip                       # noqa: E402
+from src.datasets.co3dv2 import Co3Dv2Dataset, ALL_CATEGORIES  # noqa: E402
+from src.datasets.types import UnifiedClip                         # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +63,7 @@ from datasets.adapters.base import UnifiedClip                       # noqa: E40
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Validate Co3Dv2Adapter against the D4RT unified schema.",
+        description="Validate Co3Dv2Dataset against the D4RT unified schema.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
@@ -359,7 +359,7 @@ def check_reproj(
     )
 
 
-def check_boundary_frames(c: _Checker, adapter: Co3Dv2Adapter, seq_name: str) -> None:
+def check_boundary_frames(c: _Checker, adapter: Co3Dv2Dataset, seq_name: str) -> None:
     info = adapter.get_sequence_info(seq_name)
     last = info["num_frames"] - 1
     try:
@@ -369,7 +369,7 @@ def check_boundary_frames(c: _Checker, adapter: Co3Dv2Adapter, seq_name: str) ->
         c.errors.append(f"boundary frame load failed: {exc}")
 
 
-def check_error_handling(c: _Checker, adapter: Co3Dv2Adapter, seq_name: str) -> None:
+def check_error_handling(c: _Checker, adapter: Co3Dv2Dataset, seq_name: str) -> None:
     N = adapter.get_sequence_info(seq_name)["num_frames"]
 
     raised = False
@@ -395,7 +395,7 @@ def check_error_handling(c: _Checker, adapter: Co3Dv2Adapter, seq_name: str) -> 
 
 
 def check_sanity_check_return(
-    c: _Checker, adapter: Co3Dv2Adapter, seq_name: str
+    c: _Checker, adapter: Co3Dv2Dataset, seq_name: str
 ) -> None:
     try:
         result = adapter.sanity_check(seq_name)
@@ -417,7 +417,7 @@ def check_sanity_check_return(
 # ---------------------------------------------------------------------------
 
 def validate_sequence(
-    adapter: Co3Dv2Adapter,
+    adapter: Co3Dv2Dataset,
     seq_name: str,
     clip_len: int,
     reproj_pixels: int,
@@ -483,7 +483,7 @@ def main() -> None:
     print(f"{'='*60}")
 
     try:
-        adapter = Co3Dv2Adapter(
+        adapter = Co3Dv2Dataset(
             root=args.data_root,
             categories=categories,
             subset_name=args.subset_name,

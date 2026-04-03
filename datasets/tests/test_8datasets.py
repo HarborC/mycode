@@ -25,14 +25,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from datasets.adapters.pointodyssey   import PointOdysseyAdapter
-from datasets.adapters.kubric         import KubricAdapter
-from datasets.adapters.dynamic_replica import DynamicReplicaAdapter
-from datasets.adapters.scannet        import ScanNetAdapter
-from datasets.adapters.blendedmvs     import BlendedMVSAdapter
-from datasets.adapters.mvssynth       import MVSSynthAdapter
-from datasets.adapters.TartanAir      import TartanAirAdapter
-from datasets.adapters.VirtualKitti   import VKITTI2Adapter
+from src.datasets.pointodyssey        import PointOdysseyDataset
+from src.datasets.kubric              import KubricDataset
+from src.datasets.dynamic_replica     import DynamicReplicaDataset
+from src.datasets.scannet             import ScanNetDataset
+from src.datasets.blendedmvs          import BlendedMVSDataset
+from src.datasets.mvssynth            import MVSSynthDataset
+from src.datasets.tartanair           import TartanAirDataset
+from src.datasets.virtual_kitti       import VKITTI2Dataset
 from datasets.transforms              import GeometryTransformPipeline
 from datasets.query_builder           import D4RTQueryBuilder
 from datasets.mixture                 import MixtureDataset
@@ -49,54 +49,54 @@ SLOW_THRESHOLD  = 2.0   # seconds; datasets above this flagged for H5
 DATASET_CONFIGS = [
     dict(
         name        = "pointodyssey",
-        cls         = PointOdysseyAdapter,
+        cls         = PointOdysseyDataset,
         kwargs      = dict(root="/data2/d4rt/datasets/PointOdyssey", split="train", verbose=False),
         has_tracks  = True,
     ),
     dict(
         name        = "kubric",
-        cls         = KubricAdapter,
+        cls         = KubricDataset,
         kwargs      = dict(root="/data2/d4rt/datasets/kubric"),
         has_tracks  = True,
     ),
     dict(
         name        = "dynamic_replica",
-        cls         = DynamicReplicaAdapter,
+        cls         = DynamicReplicaDataset,
         kwargs      = dict(root="/data1/d4rt/datasets/Dynamic_Replica", split="train",
                            load_trajectories=True, verbose=False),
         has_tracks  = True,   # left-camera only
     ),
     dict(
         name        = "scannet",
-        cls         = ScanNetAdapter,
+        cls         = ScanNetDataset,
         kwargs      = dict(root="/data2/d4rt/datasets/scannet/scannet",
                            precompute_root="/data2/d4rt/datasets/scannet/scannet"),
         has_tracks  = False,
     ),
     dict(
         name        = "blendedmvs",
-        cls         = BlendedMVSAdapter,
+        cls         = BlendedMVSDataset,
         kwargs      = dict(root="/data2/d4rt/datasets/BlendedMVS", split="train",
                            precompute_root="/data2/d4rt/datasets/BlendedMVS", verbose=False),
         has_tracks  = False,
     ),
     dict(
         name        = "mvssynth",
-        cls         = MVSSynthAdapter,
+        cls         = MVSSynthDataset,
         kwargs      = dict(root="/data2/d4rt/datasets/MVS-Synth/GTAV_1080",
                            precompute_root="/data2/d4rt/datasets/MVS-Synth/GTAV_1080", verbose=False),
         has_tracks  = False,
     ),
     dict(
         name        = "tartanair",
-        cls         = TartanAirAdapter,
+        cls         = TartanAirDataset,
         kwargs      = dict(root="/data2/d4rt/datasets/TartanAir", camera="left",
                            precompute_root="/data2/d4rt/datasets/TartanAir", verbose=False),
         has_tracks  = False,
     ),
     dict(
         name        = "vkitti2",
-        cls         = VKITTI2Adapter,
+        cls         = VKITTI2Dataset,
         kwargs      = dict(root="/data2/d4rt/datasets/VirtualKitti",
                            precompute_root="/data2/d4rt/datasets/VirtualKitti", verbose=False),
         has_tracks  = False,

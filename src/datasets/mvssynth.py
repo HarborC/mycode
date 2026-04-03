@@ -7,7 +7,8 @@ from typing import Any, Optional
 
 import numpy as np
 
-from .base import BaseAdapter, UnifiedClip
+from src.datasets.base import BaseDataset
+from src.datasets.types import UnifiedClip
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +70,7 @@ class _SequenceRecord:
 # Adapter
 # ---------------------------------------------------------------------------
 
-class MVSSynthAdapter(BaseAdapter):
+class MVSSynthDataset(BaseDataset):
     """Dataset adapter for MVS-Synth (GTAV_1080 variant).
 
     Expected dataset layout::
@@ -169,12 +170,12 @@ class MVSSynthAdapter(BaseAdapter):
 
         if self.verbose:
             print(
-                f"[MVSSynthAdapter] root={self.root.name}, "
+                f"[MVSSynthDataset] root={self.root.name}, "
                 f"sequences={len(self._records)}"
             )
 
     # ------------------------------------------------------------------
-    # BaseAdapter interface
+    # BaseDataset interface
     # ------------------------------------------------------------------
 
     def __len__(self) -> int:
@@ -325,7 +326,7 @@ class MVSSynthAdapter(BaseAdapter):
 
     def _load_precomputed(self, sequence_name: str, frame_indices: list[int]) -> Optional[dict]:
         """Load precomputed data for frame_indices. Prefers .h5 over .npz."""
-        from datasets.adapters.base import load_precomputed_fast
+        from src.datasets.base import load_precomputed_fast
         path = self.precompute_root / sequence_name / "precomputed.npz"
         h5_path = path.with_suffix('.h5')
         if not path.exists() and not h5_path.exists():
@@ -349,7 +350,7 @@ class MVSSynthAdapter(BaseAdapter):
         2. Intrinsics shape (T, 3, 3), finite, positive focal lengths.
         3. Extrinsics shape (T, 4, 4), finite, rotation near-orthonormal,
            last row == [0, 0, 0, 1].
-        4. Depth values finite after inf→0 conversion; at least some
+        4. Depth values finite after inf->0 conversion; at least some
            positive values per frame.
         5. Round-trip reprojection: unproject center pixel, re-project,
            check error < 1 px.
@@ -363,7 +364,7 @@ class MVSSynthAdapter(BaseAdapter):
         msgs: list[str] = []
         ok = True
 
-        # ── 1. File existence (first 5 frames) ──────────────────────────
+        # -- 1. File existence (first 5 frames) -------------------------------
         probe_count = min(5, r.num_frames)
         for i in range(probe_count):
             for key, path in [
@@ -383,7 +384,7 @@ class MVSSynthAdapter(BaseAdapter):
                 "messages": msgs,
             }
 
-        # ── Load probe clip ──────────────────────────────────────────────
+        # -- Load probe clip --------------------------------------------------
         try:
             clip = self.load_clip(sequence_name, list(range(probe_count)))
         except Exception as exc:
@@ -396,7 +397,7 @@ class MVSSynthAdapter(BaseAdapter):
 
         T = probe_count
 
-        # ── 2. Intrinsics ───────────────────────────────────────────────
+        # -- 2. Intrinsics ----------------------------------------------------
         if clip.intrinsics.shape != (T, 3, 3):
             ok = False
             msgs.append(f"intrinsics shape {clip.intrinsics.shape} != ({T},3,3)")
@@ -410,7 +411,7 @@ class MVSSynthAdapter(BaseAdapter):
                 ok = False
                 msgs.append(f"non-positive focal lengths: fx={fx}, fy={fy}")
 
-        # ── 3. Extrinsics ───────────────────────────────────────────────
+        # -- 3. Extrinsics ----------------------------------------------------
         if clip.extrinsics.shape != (T, 4, 4):
             ok = False
             msgs.append(f"extrinsics shape {clip.extrinsics.shape} != ({T},4,4)")
@@ -430,13 +431,13 @@ class MVSSynthAdapter(BaseAdapter):
             if err > 1e-4:
                 ok = False
                 msgs.append(f"rotation matrices non-orthonormal: max ||RR^T-I||_F={err:.2e}")
-            # Note: det(R) ≈ -1 is expected for MVS-Synth (left-handed system)
+            # Note: det(R) ~ -1 is expected for MVS-Synth (left-handed system)
             dets = np.linalg.det(R)
             if not np.all(np.abs(np.abs(dets) - 1.0) < 1e-4):
                 ok = False
-                msgs.append(f"rotation det not ±1: range [{dets.min():.6f},{dets.max():.6f}]")
+                msgs.append(f"rotation det not +/-1: range [{dets.min():.6f},{dets.max():.6f}]")
 
-        # ── 4. Depth ────────────────────────────────────────────────────
+        # -- 4. Depth ---------------------------------------------------------
         for t in range(T):
             dep = clip.depths[t]
             if not np.isfinite(dep).all():
@@ -446,7 +447,7 @@ class MVSSynthAdapter(BaseAdapter):
                 ok = False
                 msgs.append(f"depth[{t}] has no positive values")
 
-        # ── 5. Reprojection ─────────────────────────────────────────────
+        # -- 5. Reprojection --------------------------------------------------
         for t in range(T):
             dep = clip.depths[t]
             K = clip.intrinsics[t].astype(np.float64)
@@ -532,11 +533,11 @@ class MVSSynthAdapter(BaseAdapter):
                     raise
                 skipped.append(f"{seq_dir.name}: {exc}")
                 if self.verbose:
-                    print(f"[MVSSynthAdapter][WARN] skip {seq_dir.name}: {exc}")
+                    print(f"[MVSSynthDataset][WARN] skip {seq_dir.name}: {exc}")
 
         if self.verbose and skipped:
             print(
-                f"[MVSSynthAdapter] skipped {len(skipped)} sequences "
+                f"[MVSSynthDataset] skipped {len(skipped)} sequences "
                 "(non-strict mode)"
             )
 

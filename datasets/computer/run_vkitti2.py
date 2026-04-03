@@ -6,7 +6,7 @@ This script derives normals (from depth+intrinsics) and pseudo-static tracks
 (from depth+pose, Strategy A) and caches them as precomputed.npz.
 
 The output directory structure mirrors the adapter's sequence names so that
-VKITTI2Adapter can load the cache with:
+VKITTI2Dataset can load the cache with:
     <output_root> / <seq_name> / precomputed.npz
   e.g.  <output_root> / Scene01_clone / precomputed.npz
 
@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # /data2/d4rt/cod
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # /data2/d4rt/code/datasets
 
 from computer._run_common import run_precompute
-from adapters.VirtualKitti import VKITTI2Adapter
+from src.datasets.virtual_kitti import VKITTI2Dataset
 
 
 def main() -> None:
@@ -51,7 +51,7 @@ def main() -> None:
                         help="Re-compute even if precomputed.npz already exists")
     args = parser.parse_args()
 
-    adapter = VKITTI2Adapter(root=args.root, camera=args.camera, verbose=False)
+    adapter = VKITTI2Dataset(root=args.root, camera=args.camera, verbose=False)
     output_root = Path(args.output_root) if args.output_root else Path(args.root)
 
     run_precompute(

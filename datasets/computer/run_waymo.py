@@ -11,7 +11,7 @@ NOTE: Waymo depth maps are LiDAR-projected and therefore very sparse.
       to avoid GPU memory issues in multi-process mode.
 
 The output directory structure mirrors the adapter's sequence names so that
-WaymoAdapter can load the cache with:
+WaymoDataset can load the cache with:
     <output_root> / <seq_name> / precomputed.npz
 
 Usage:
@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # /data2/d4rt/cod
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # /data2/d4rt/code/datasets
 
 from computer._run_common import run_precompute
-from adapters.Waymo import WaymoAdapter
+from src.datasets.waymo import WaymoDataset
 
 
 def main() -> None:
@@ -58,7 +58,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # extract_flow=False: skip RAFT during precompute to avoid GPU contention
-    adapter = WaymoAdapter(root=args.root, extract_flow=False, verbose=False)
+    adapter = WaymoDataset(root=args.root, extract_flow=False, verbose=False)
     output_root = Path(args.output_root) if args.output_root else Path(args.root)
 
     run_precompute(

@@ -8,10 +8,11 @@ from typing import Any, Optional
 import cv2
 import numpy as np
 
-from .base import BaseAdapter, UnifiedClip
+from src.datasets.base import BaseDataset
+from src.datasets.types import UnifiedClip
 
 
-class VKITTI2Adapter(BaseAdapter):
+class VKITTI2Dataset(BaseDataset):
     dataset_name: str = "vkitti2"
 
     def __init__(
@@ -52,7 +53,7 @@ class VKITTI2Adapter(BaseAdapter):
             raise RuntimeError(f"No valid VKITTI2 sequences found under {self.root}")
 
         if self.verbose:
-            print(f"[VKITTI2Adapter] split={self.split}, camera={self.camera}, "
+            print(f"[VKITTI2Dataset] split={self.split}, camera={self.camera}, "
                   f"num_sequences={len(self.sequences)}, "
                   f"precompute={'yes' if self.precompute_root else 'no'}")
 
@@ -90,7 +91,7 @@ class VKITTI2Adapter(BaseAdapter):
         """Load precomputed normals/tracks for frame_indices. Prefers .h5 over .npz."""
         if self.precompute_root is None:
             return None
-        from datasets.adapters.base import load_precomputed_fast
+        from src.datasets.base import load_precomputed_fast
         cache_path = self.precompute_root / sequence_name / "precomputed.npz"
         h5_path = cache_path.with_suffix('.h5')
         if not cache_path.exists() and not h5_path.exists():
@@ -99,7 +100,7 @@ class VKITTI2Adapter(BaseAdapter):
             return load_precomputed_fast(cache_path, frame_indices)
         except Exception as e:
             if self.verbose:
-                print(f"[VKITTI2Adapter] Warning: failed to load cache for {sequence_name}: {e}")
+                print(f"[VKITTI2Dataset] Warning: failed to load cache for {sequence_name}: {e}")
             return None
 
     def get_sequence_info(self, sequence_name: str) -> dict[str, Any]:
@@ -237,7 +238,7 @@ class VKITTI2Adapter(BaseAdapter):
                 has_precomputed = True
             except Exception as e:
                 if self.verbose:
-                    print(f"[VKITTI2Adapter] Warning: precomputed indexing failed for {sequence_name}: {e}")
+                    print(f"[VKITTI2Dataset] Warning: precomputed indexing failed for {sequence_name}: {e}")
 
         return UnifiedClip(
             dataset_name=self.dataset_name,

@@ -9,7 +9,8 @@ from typing import Any, Optional
 import numpy as np
 from PIL import Image
 
-from .base import BaseAdapter, UnifiedClip, load_precomputed_fast
+from src.datasets.base import BaseDataset, load_precomputed_fast
+from src.datasets.types import UnifiedClip
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +46,7 @@ def _ndc_to_pinhole(
     principal_point: list[float],
     image_wh: list[int],
 ) -> np.ndarray:
-    """Convert Co3D NDC camera intrinsics to a standard 3×3 pinhole matrix.
+    """Convert Co3D NDC camera intrinsics to a standard 3x3 pinhole matrix.
 
     Co3D stores intrinsics in PyTorch3D NDC (normalised device coordinates)
     with ``intrinsics_format="ndc_isotropic"``:
@@ -73,7 +74,7 @@ def _ndc_to_pinhole(
     fy = focal_length[1] * half_s
 
     # NDC pp sign convention: pp_ndc_x = (W/2 - cx_px) / half_s
-    #  → cx_px = W/2 - pp_ndc_x * half_s
+    #  -> cx_px = W/2 - pp_ndc_x * half_s
     cx = W / 2.0 - principal_point[0] * half_s
     cy = H / 2.0 - principal_point[1] * half_s
 
@@ -89,7 +90,7 @@ def _p3d_to_opencv_extrinsics(
     R_p3d: list[list[float]],
     T_p3d: list[float],
 ) -> np.ndarray:
-    """Convert PyTorch3D camera pose to a standard 4×4 OpenCV-style w2c matrix.
+    """Convert PyTorch3D camera pose to a standard 4x4 OpenCV-style w2c matrix.
 
     PyTorch3D uses **row-vector** convention:
         p_cam_p3d = p_world @ R + T
@@ -99,16 +100,16 @@ def _p3d_to_opencv_extrinsics(
 
     Conversion:
         - Transpose R to switch to column-vector convention.
-        - Apply axis flip D = diag(−1, −1, 1) to correct +x and +y directions.
+        - Apply axis flip D = diag(-1, -1, 1) to correct +x and +y directions.
 
         R_cv = D @ R_p3d.T
         T_cv = D @ T_p3d
 
-    The resulting 4×4 matrix satisfies
+    The resulting 4x4 matrix satisfies
         p_cam_cv = E_w2c @ p_world_h   (homogeneous column vectors, OpenCV).
 
     Args:
-        R_p3d:  3×3 rotation as nested list (row-vector convention).
+        R_p3d:  3x3 rotation as nested list (row-vector convention).
         T_p3d:  3-element translation as list.
 
     Returns:
@@ -189,7 +190,7 @@ ALL_CATEGORIES: list[str] = [
     "toytruck", "tv", "umbrella", "vase", "wineglass",
 ]
 
-# Maps subset_name → (set_lists filename suffix, split key inside that file).
+# Maps subset_name -> (set_lists filename suffix, split key inside that file).
 _SUBSET_MAP: dict[str, tuple[str, str]] = {
     "fewview_train":    ("fewview_train",    "train"),
     "fewview_dev":      ("fewview_dev",      "val"),
@@ -200,7 +201,7 @@ _SUBSET_MAP: dict[str, tuple[str, str]] = {
 }
 
 
-class Co3Dv2Adapter(BaseAdapter):
+class Co3Dv2Dataset(BaseDataset):
     """Dataset adapter for Co3D version 2.
 
     Dataset layout (per category)::
@@ -286,7 +287,7 @@ class Co3Dv2Adapter(BaseAdapter):
         root :
             Root directory of the Co3Dv2 dataset.
         categories :
-            List of category names to include.  ``None`` → all 51 categories.
+            List of category names to include.  ``None`` -> all 51 categories.
         subset_name :
             Which subset to use.  One of:
             ``"fewview_train"``, ``"fewview_dev"``, ``"fewview_test"``,
@@ -323,7 +324,7 @@ class Co3Dv2Adapter(BaseAdapter):
         self.verbose = verbose
         self.precompute_root = Path(precompute_root) if precompute_root else self.root
 
-        # category → {(seq_name, frame_number): frame_annotation_dict}
+        # category -> {(seq_name, frame_number): frame_annotation_dict}
         # Populated lazily on first access.
         self._frame_anno_cache: dict[str, dict[tuple[str, int], dict]] = {}
 
@@ -345,13 +346,13 @@ class Co3Dv2Adapter(BaseAdapter):
 
         if self.verbose:
             print(
-                f"[Co3Dv2Adapter] subset={subset_name!r}, split={split!r}, "
+                f"[Co3Dv2Dataset] subset={subset_name!r}, split={split!r}, "
                 f"categories={len(self.categories)}, "
                 f"sequences={len(self._records)}"
             )
 
     # ------------------------------------------------------------------
-    # BaseAdapter interface
+    # BaseDataset interface
     # ------------------------------------------------------------------
 
     def __len__(self) -> int:
@@ -465,7 +466,7 @@ class Co3Dv2Adapter(BaseAdapter):
                 # load_precomputed_fast already reorders data to frame_indices order,
                 # so we index with consecutive [0, 1, ..., len-1] here.
                 T_clip = len(frame_indices)
-                # normals: shape (T_clip, H, W, 3) → list of (H,W,3)
+                # normals: shape (T_clip, H, W, 3) -> list of (H,W,3)
                 normals_raw = cache["normals"]  # (T_clip, H, W, 3) float16
                 normals_out = [
                     normals_raw[i].astype(np.float32) for i in range(T_clip)
@@ -538,7 +539,7 @@ class Co3Dv2Adapter(BaseAdapter):
         msgs: list[str] = []
         ok = True
 
-        # ── 1. File existence (first 5 frames) ──────────────────────────
+        # -- 1. File existence (first 5 frames) --------------------------
         probe_count = min(5, r.num_frames)
         for i in range(probe_count):
             fn = r.frame_numbers[i]
@@ -563,7 +564,7 @@ class Co3Dv2Adapter(BaseAdapter):
             return {"dataset_name": self.dataset_name, "sequence_name": sequence_name,
                     "ok": False, "messages": msgs}
 
-        # ── Load probe clip ──────────────────────────────────────────────
+        # -- Load probe clip ---------------------------------------------
         try:
             clip = self.load_clip(sequence_name, list(range(probe_count)))
         except Exception as exc:
@@ -576,7 +577,7 @@ class Co3Dv2Adapter(BaseAdapter):
 
         T = probe_count
 
-        # ── 2. Intrinsics ───────────────────────────────────────────────
+        # -- 2. Intrinsics -----------------------------------------------
         if clip.intrinsics.shape != (T, 3, 3):
             ok = False
             msgs.append(f"intrinsics shape {clip.intrinsics.shape} != ({T},3,3)")
@@ -590,7 +591,7 @@ class Co3Dv2Adapter(BaseAdapter):
                 ok = False
                 msgs.append(f"non-positive focal lengths: fx={fx}, fy={fy}")
 
-        # ── 3. Extrinsics ───────────────────────────────────────────────
+        # -- 3. Extrinsics -----------------------------------------------
         if clip.extrinsics.shape != (T, 4, 4):
             ok = False
             msgs.append(f"extrinsics shape {clip.extrinsics.shape} != ({T},4,4)")
@@ -611,14 +612,14 @@ class Co3Dv2Adapter(BaseAdapter):
                 ok = False
                 msgs.append(f"rotation matrices non-orthonormal: max ||RR^T-I||_F={err:.2e}")
 
-        # ── 4. Depth ────────────────────────────────────────────────────
+        # -- 4. Depth ----------------------------------------------------
         for t in range(T):
             dep = clip.depths[t]
             if not np.isfinite(dep).all():
                 ok = False
                 msgs.append(f"depth[{t}] contains non-finite values")
 
-        # ── 5. Reprojection ─────────────────────────────────────────────
+        # -- 5. Reprojection ---------------------------------------------
         for t in range(T):
             dep = clip.depths[t]
             K = clip.intrinsics[t].astype(np.float64)
@@ -707,11 +708,11 @@ class Co3Dv2Adapter(BaseAdapter):
                     raise
                 skipped_cats.append(f"{cat}: {exc}")
                 if self.verbose:
-                    print(f"[Co3Dv2Adapter][WARN] skip category {cat}: {exc}")
+                    print(f"[Co3Dv2Dataset][WARN] skip category {cat}: {exc}")
 
         if self.verbose and skipped_cats:
             print(
-                f"[Co3Dv2Adapter] skipped {len(skipped_cats)} categories "
+                f"[Co3Dv2Dataset] skipped {len(skipped_cats)} categories "
                 "(non-strict mode)"
             )
 

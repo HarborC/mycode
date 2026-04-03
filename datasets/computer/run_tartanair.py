@@ -6,7 +6,7 @@ This script derives normals (from depth+intrinsics) and pseudo-static tracks
 (from depth+pose, Strategy A) and caches them as precomputed.npz.
 
 The output directory structure mirrors the adapter's sequence names so that
-TartanAirAdapter can load the cache with:
+TartanAirDataset can load the cache with:
     <output_root> / <seq_name> / precomputed.npz
 
 Usage:
@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # /data2/d4rt/cod
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # /data2/d4rt/code/datasets
 
 from computer._run_common import run_precompute
-from adapters.TartanAir import TartanAirAdapter
+from src.datasets.tartanair import TartanAirDataset
 
 
 def main() -> None:
@@ -50,7 +50,7 @@ def main() -> None:
                         help="Re-compute even if precomputed.npz already exists")
     args = parser.parse_args()
 
-    adapter = TartanAirAdapter(root=args.root, camera=args.camera, verbose=False)
+    adapter = TartanAirDataset(root=args.root, camera=args.camera, verbose=False)
     output_root = Path(args.output_root) if args.output_root else Path(args.root)
 
     run_precompute(

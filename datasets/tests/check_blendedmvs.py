@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validation script for BlendedMVSAdapter.
+"""Validation script for BlendedMVSDataset.
 
 Checks performed
 ----------------
@@ -47,8 +47,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from datasets.adapters.blendedmvs import BlendedMVSAdapter  # noqa: E402
-from datasets.adapters.base import UnifiedClip              # noqa: E402
+from src.datasets.blendedmvs import BlendedMVSDataset  # noqa: E402
+from src.datasets.types import UnifiedClip                # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ from datasets.adapters.base import UnifiedClip              # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Validate BlendedMVSAdapter against the D4RT unified schema.",
+        description="Validate BlendedMVSDataset against the D4RT unified schema.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
@@ -445,7 +445,7 @@ def check_reprojection(
         )
 
 
-def check_masked_variant(c: _Checker, adapter: BlendedMVSAdapter, seq_name: str) -> None:
+def check_masked_variant(c: _Checker, adapter: BlendedMVSDataset, seq_name: str) -> None:
     """Verify that masked images exist and can be loaded."""
     rec = adapter._get_record(seq_name)
     fid = rec.frame_ids[0]
@@ -468,7 +468,7 @@ def check_masked_variant(c: _Checker, adapter: BlendedMVSAdapter, seq_name: str)
 
 
 def check_boundary_frames(
-    c: _Checker, adapter: BlendedMVSAdapter, seq_name: str
+    c: _Checker, adapter: BlendedMVSDataset, seq_name: str
 ) -> None:
     """Load a clip with only the first and last frame indices."""
     info = adapter.get_sequence_info(seq_name)
@@ -480,7 +480,7 @@ def check_boundary_frames(
         c.errors.append(f"boundary frame load failed: {exc}")
 
 
-def check_error_handling(c: _Checker, adapter: BlendedMVSAdapter, seq_name: str) -> None:
+def check_error_handling(c: _Checker, adapter: BlendedMVSDataset, seq_name: str) -> None:
     """Verify that invalid inputs raise the expected exceptions."""
     # Out-of-range frame index
     info = adapter.get_sequence_info(seq_name)
@@ -510,7 +510,7 @@ def check_error_handling(c: _Checker, adapter: BlendedMVSAdapter, seq_name: str)
 
 
 def check_adapter_sanity_check_return(
-    c: _Checker, adapter: BlendedMVSAdapter, seq_name: str
+    c: _Checker, adapter: BlendedMVSDataset, seq_name: str
 ) -> None:
     """Call adapter.sanity_check() and validate its return structure."""
     try:
@@ -536,7 +536,7 @@ def check_adapter_sanity_check_return(
 # ---------------------------------------------------------------------------
 
 def validate_sequence(
-    adapter: BlendedMVSAdapter,
+    adapter: BlendedMVSDataset,
     seq_name: str,
     clip_len: int,
     reproj_pixels: int,
@@ -604,7 +604,7 @@ def run_split(
     print(f"{'='*60}")
 
     try:
-        adapter = BlendedMVSAdapter(
+        adapter = BlendedMVSDataset(
             root=args.data_root,
             split=split,
             verbose=args.verbose,

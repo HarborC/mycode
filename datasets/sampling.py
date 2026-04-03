@@ -22,7 +22,7 @@ import random as _random_module
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-from datasets.adapters.base import BaseAdapter
+from src.datasets.base import BaseDataset
 
 
 @dataclass
@@ -89,7 +89,7 @@ class DatasetSampler:
 
     def __init__(
         self,
-        adapter: BaseAdapter,
+        adapter: BaseDataset,
         clip_len: int = 8,
         sampling_mode: Literal['random', 'sequential', 'stride'] = 'random',
         min_frames: int = 8,

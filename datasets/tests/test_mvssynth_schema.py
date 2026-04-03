@@ -9,7 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from datasets.adapters.mvssynth import MVSSynthAdapter
+from src.datasets.mvssynth import MVSSynthDataset
 
 
 def test_schema_compliance():
@@ -20,7 +20,7 @@ def test_schema_compliance():
     print("=" * 80)
 
     # Initialize adapter
-    adapter = MVSSynthAdapter(
+    adapter = MVSSynthDataset(
         root="/data2/d4rt/datasets/MVS-Synth/GTAV_1080",
         verbose=False,
     )

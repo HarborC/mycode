@@ -27,7 +27,8 @@ import torch
 import torchvision.transforms.functional as F_vision
 from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
 
-from .base import BaseAdapter, UnifiedClip
+from src.datasets.base import BaseDataset
+from src.datasets.types import UnifiedClip
 
 
 class RAFTFlowEstimator:
@@ -50,7 +51,7 @@ class RAFTFlowEstimator:
         return flow.cpu().numpy().transpose(1, 2, 0)
 
 
-class WaymoAdapter(BaseAdapter):
+class WaymoDataset(BaseDataset):
     dataset_name: str = "waymo"
 
     def __init__(
@@ -80,7 +81,7 @@ class WaymoAdapter(BaseAdapter):
             raise RuntimeError(f"No valid Waymo sequences found under {self.root}")
 
         if self.verbose:
-            print(f"[WaymoAdapter] split={self.split}, num_sequences={len(self.sequences)}, "
+            print(f"[WaymoDataset] split={self.split}, num_sequences={len(self.sequences)}, "
                   f"extract_flow={self.extract_flow}, precompute={'yes' if self.precompute_root else 'no'}")
 
     def __len__(self) -> int:
@@ -111,7 +112,7 @@ class WaymoAdapter(BaseAdapter):
             return {k: data[k] for k in data.files}
         except Exception as e:
             if self.verbose:
-                print(f"[WaymoAdapter] Warning: failed to load cache for {sequence_name}: {e}")
+                print(f"[WaymoDataset] Warning: failed to load cache for {sequence_name}: {e}")
             return None
 
     def get_sequence_info(self, sequence_name: str) -> dict[str, Any]:
@@ -220,7 +221,7 @@ class WaymoAdapter(BaseAdapter):
                 has_precomputed = True
             except Exception as e:
                 if self.verbose:
-                    print(f"[WaymoAdapter] Warning: precomputed indexing failed for {sequence_name}: {e}")
+                    print(f"[WaymoDataset] Warning: precomputed indexing failed for {sequence_name}: {e}")
 
         return UnifiedClip(
             dataset_name=self.dataset_name,

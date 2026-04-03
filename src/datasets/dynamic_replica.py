@@ -9,7 +9,8 @@ from typing import Any, Optional
 import numpy as np
 from PIL import Image
 
-from .base import BaseAdapter, UnifiedClip
+from src.datasets.base import BaseDataset
+from src.datasets.types import UnifiedClip
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +174,7 @@ class _DRSequenceRecord:
 # Adapter
 # ---------------------------------------------------------------------------
 
-class DynamicReplicaAdapter(BaseAdapter):
+class DynamicReplicaDataset(BaseDataset):
     """Dataset adapter for the Dynamic_Replica dataset.
 
     Dataset layout::
@@ -300,14 +301,14 @@ class DynamicReplicaAdapter(BaseAdapter):
             n_left = sum(1 for r in self._records if r.camera_name == "left")
             n_right = sum(1 for r in self._records if r.camera_name == "right")
             print(
-                f"[DynamicReplicaAdapter] split={split!r}, "
+                f"[DynamicReplicaDataset] split={split!r}, "
                 f"sequences={len(self._records)} "
                 f"(left={n_left}, right={n_right}), "
                 f"load_trajectories={load_trajectories}"
             )
 
     # ------------------------------------------------------------------
-    # BaseAdapter interface
+    # BaseDataset interface
     # ------------------------------------------------------------------
 
     def __len__(self) -> int:
@@ -701,11 +702,11 @@ class DynamicReplicaAdapter(BaseAdapter):
                     raise
                 skipped.append(f"{seq_dir.name}: {exc}")
                 if self.verbose:
-                    print(f"[DynamicReplicaAdapter][WARN] skip {seq_dir.name}: {exc}")
+                    print(f"[DynamicReplicaDataset][WARN] skip {seq_dir.name}: {exc}")
 
         if self.verbose and skipped:
             print(
-                f"[DynamicReplicaAdapter] skipped {len(skipped)} directories "
+                f"[DynamicReplicaDataset] skipped {len(skipped)} directories "
                 "(non-strict mode)"
             )
 

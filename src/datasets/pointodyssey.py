@@ -13,7 +13,8 @@ from typing import Any, Optional
 import cv2
 import numpy as np
 
-from .base import BaseAdapter, UnifiedClip
+from src.datasets.base import BaseDataset
+from src.datasets.types import UnifiedClip
 
 
 VALID_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".exr", ".npy"}
@@ -56,7 +57,7 @@ class SequenceRecord:
     encoded_cache_paths: Optional[dict[str, Path]] = None
 
 
-class PointOdysseyAdapter(BaseAdapter):
+class PointOdysseyDataset(BaseDataset):
     dataset_name: str = "pointodyssey"
 
     def __init__(
@@ -105,7 +106,7 @@ class PointOdysseyAdapter(BaseAdapter):
             fast_count = sum(1 for r in self.records if r.fast_anno_paths is not None)
             enc_count = sum(1 for r in self.records if r.encoded_cache_paths is not None)
             print(
-                f"[PointOdysseyAdapter] split={self.split}, "
+                f"[PointOdysseyDataset] split={self.split}, "
                 f"num_sequences={len(self.records)}, strict={self.strict}, "
                 f"fast_anno={fast_count}, encoded_cache={enc_count}"
             )
@@ -407,7 +408,7 @@ class PointOdysseyAdapter(BaseAdapter):
         valid_records = [r for r in results if r is not None]
 
         if self.verbose and skipped:
-            print(f"[PointOdysseyAdapter] skipped {len(skipped)} scenes in non-strict mode.")
+            print(f"[PointOdysseyDataset] skipped {len(skipped)} scenes in non-strict mode.")
 
         return valid_records
 
