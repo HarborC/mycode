@@ -72,3 +72,6 @@ Thumbs.db
 *.temp
 tmp/
 temp/
+
+ref/*
+*.rrd
