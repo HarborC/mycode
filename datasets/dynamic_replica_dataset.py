@@ -238,4 +238,5 @@ if __name__ == '__main__':
         sampling_mode="stride"
     )
 
+    dataset[0].save_as_rrd('Dynamic_Replica_clip.rrd')
     visualize_dataset(dataset, start_idx=0)
