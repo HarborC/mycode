@@ -1,20 +1,17 @@
 import sys
-sys.path.append('.')
+sys.path.insert(0, '.')
 
 from datasets.base.base_dataset import BaseDataset
+from datasets.base.types import UnifiedClip
 import os
 import numpy as np
 import os.path as osp
-import h5py
-from utils.basic import seed_anything
 from PIL import Image
 from tqdm import tqdm
 from datasets.base.transforms import *
-from datasets.base.utils import view_name, tensor2numpy
 
 def xyzqxqyqxqw_to_c2w(xyzqxqyqxqw):
     xyzqxqyqxqw = np.array(xyzqxqyqxqw, dtype=np.float32)
-    #NOTE: we need to convert x_y_z coordinate system to z_x_y coordinate system
     z, x, y = xyzqxqyqxqw[:3]
     qz, qx, qy, qw = xyzqxqyqxqw[3:]
     c2w = np.eye(4)
@@ -93,23 +90,19 @@ class TarTanAirDataset(BaseDataset):
     def __len__(self):
         return len(self.sequences)
 
-    def _get_views(self, index, resolution, rng):
+    def _get_clip(self, index, resolution, rng):
         scene = self.sequences[index]
         num_imgs = self.num_imgs[scene]
 
-        # Use parent class stride sampling if sampling_mode is 'stride'
         if self.sampling_mode == 'stride':
             idxs = self._sample_frame_indices(num_imgs, rng)
         elif self.sampling_mode == 'random':
             idxs = [rng.integers(0, num_imgs)]
-
-            # max_distance = 12 if scene in self.special_scenes else self.max_distance
             max_distance = int(self.max_distance / 8 * self.frame_num)
             start_idx = max(0, idxs[-1] - max_distance)
             end_idx = min(num_imgs-1, start_idx + 2*max_distance)
             start_idx = max(0, end_idx - 2*max_distance)
             valid_indices = np.arange(start_idx, end_idx + 1)
-
             should_replace = len(valid_indices) < self.frame_num - 1
             idxs.extend(list(rng.choice(valid_indices, self.frame_num-1, replace=should_replace)))
 
@@ -121,40 +114,56 @@ class TarTanAirDataset(BaseDataset):
         cam_path = os.path.join(self.data_root, scene[0], scene[1], scene[2], 'pose_left.txt')
         caminfo = np.loadtxt(cam_path)
 
-        views = []
+        images, depths, poses, intrinsics = [], [], [], []
+        pts3d_list, valid_mask_list = [], []
+        instances = []
+
+        clip_label = f'{scene[0]}_{scene[1]}_{scene[2]}'
+
         for idx in idxs:
             impath = os.path.join(self.data_root, scene[0], scene[1], scene[2], 'image_left', f'{idx:06d}_left.png')
             depthpath = os.path.join(self.data_root, scene[0], scene[1], scene[2], 'depth_left', f'{idx:06d}_left_depth.npy')
 
-            # load camera params
             camera_pose = np.array(xyzqxqyqxqw_to_c2w(caminfo[idx]), dtype=np.float32)
-
-            # load image and depth
             rgb_image = np.array(Image.open(impath))
-
             depthmap = np.load(depthpath)
             depthmap[depthmap > 80] = -1
 
-            rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(
-                rgb_image, depthmap, self.intrinsics, resolution, rng=rng, info=impath)
+            rgb_image, depthmap, K, _, _, _, _ = self._crop_resize_if_necessary(
+                rgb_image, depthmap, self.intrinsics.copy(), resolution, rng=rng, info=impath)
 
-            views.append(dict(
-                img=rgb_image,
-                depthmap=depthmap,
-                camera_pose=camera_pose,
-                camera_intrinsics=intrinsics.astype(np.float32),
-                dataset=self.dataset_label,
-                label=f'{scene[0]}_{scene[1]}_{scene[2]}',
-                instance=str(idx),
-            ))
-        return views
+            pts3d_i, valid_mask_i, depthmap = self._process_depth(
+                depthmap, K, camera_pose,
+                label=f'{self.dataset_label}/{clip_label}', frame_id=str(idx))
+
+            images.append(self.transform(rgb_image))
+            depths.append(depthmap.astype(np.float32))
+            poses.append(camera_pose)
+            intrinsics.append(K)
+            instances.append(str(idx))
+            pts3d_list.append(pts3d_i)
+            valid_mask_list.append(valid_mask_i)
+
+        clip = UnifiedClip(
+            images=torch.stack(images, dim=0),
+            depths=np.stack(depths, axis=0),
+            camera_poses=np.stack(poses, axis=0),
+            intrinsics=np.stack(intrinsics, axis=0),
+            dataset=self.dataset_label,
+            label=clip_label,
+            instances=instances,
+            metadata={},
+        )
+        clip.pts3d = np.stack(pts3d_list, axis=0)
+        clip.valid_mask = np.stack(valid_mask_list, axis=0)
+        return clip
 
 
 if __name__ == '__main__':
     from datasets.utils.viser import visualize_dataset
 
     dataset = TarTanAirDataset(
-        data_root='/data2/d4rt/datasets/TartanAir2',
+        data_root='/home/disk2/jiagangchen/data/dynamic_dataset/droid/tartanair',
         frame_num=48,
         resolution=[(512, 384)],
         mode='train',

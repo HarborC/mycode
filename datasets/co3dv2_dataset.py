@@ -1,7 +1,8 @@
 import sys
-sys.path.append('.')
+sys.path.insert(0, '.')
 
 from datasets.base.base_dataset import BaseDataset
+from datasets.base.types import UnifiedClip
 import os
 import numpy as np
 import os.path as osp
@@ -74,12 +75,13 @@ class CO3DV2Dataset(BaseDataset):
         assert data_root is not None
 
         self.verbose = verbose
-        self.dataset_label = 'COD3DV2'
+        self.dataset_label = 'CO3DV2'
         self.data_root = data_root
 
         assert mask_bg in (True, False, 'rand')
         self.mask_bg = mask_bg
 
+        os.makedirs('data/dataset_cache', exist_ok=True)
         if not os.path.exists(f'data/dataset_cache/co3dv2_{self.mode}_cache.npy'):
             self.sequences = []
             self.num_image = {}
@@ -94,7 +96,7 @@ class CO3DV2Dataset(BaseDataset):
                     else:
                         with gzip.open(annotation_path_test, 'rt', encoding='utf-8') as f:
                             annotation = json.load(f)
-                except:
+                except Exception:
                     continue
 
                 for sub_seq in annotation.keys():
@@ -108,8 +110,6 @@ class CO3DV2Dataset(BaseDataset):
             self.sequences = npy['sequences']
             self.num_image = npy['num_image']
 
-        # self.sequences = sorted(self.sequences)
-
         if self.verbose:
             print(f'[{self.dataset_label}] Sequences of {self.dataset_label} dataset:', self.sequences)
 
@@ -117,11 +117,9 @@ class CO3DV2Dataset(BaseDataset):
 
     def __len__(self):
         return len(self.sequences)
-                    
-    def _get_views(self, index, resolution, rng):
+
+    def _get_clip(self, index, resolution, rng):
         scene = tuple(self.sequences[index])
-        # num_img = self.num_image[scene]
-        # idxs = rng.choice(num_img, self.frame_num)
 
         # decide now if we mask the bg
         mask_bg = (self.mask_bg == True) or (self.mask_bg == 'rand' and rng.choice(2))
@@ -138,15 +136,20 @@ class CO3DV2Dataset(BaseDataset):
         annotation = {**annotation_train, **annotation_test}[scene[1]]
 
         num_img = len(annotation)
-        idxs = self._sample_frame_indices(num_img, rng)
-        
+        frame_idxs = self._sample_frame_indices(num_img, rng)
+
         self.this_views_info = dict(
             scene=scene,
-            idxs=idxs,
+            idxs=frame_idxs,
         )
 
-        views = []
-        for idx in idxs:
+        images, depths, poses, intrinsics = [], [], [], []
+        pts3d_list, valid_mask_list = [], []
+        instances = []
+
+        clip_label = scene[0]+'-'+scene[1]
+
+        for idx in frame_idxs:
             anno = annotation[idx]
             filepath = anno['filepath']
 
@@ -165,13 +168,10 @@ class CO3DV2Dataset(BaseDataset):
             camera_pose = np.eye(4)
             R = np.array(anno['R'])
             T = np.array(anno['T'])
-            # camera_pose[:3, :3] = R.T
-            # camera_pose[:3, 3] = - R.T @ T
 
             image_size = np.array([rgb_image.shape[0], rgb_image.shape[1]])
             focal_length = np.array(anno['focal_length'])
             principal_point = np.array(anno['principal_point'])
-            # K = convert_ndc_to_pinhole(focal_length, principal_point, image_size)
 
             R, tvec, camera_intrinsics = opencv_from_cameras_projection(R, T, focal_length, principal_point, image_size)
             camera_pose[:3, :3] = R
@@ -179,27 +179,39 @@ class CO3DV2Dataset(BaseDataset):
             camera_pose = np.linalg.inv(camera_pose)
 
             if mask_bg:
-                # load object mask
                 maskpath = impath.replace('/images/', '/masks/').replace('.jpg', '.png')
                 maskmap = np.array(Image.open(maskpath)).astype(np.float32)
                 maskmap = (maskmap / 255.0) > 0.1
-
-                # update the depthmap with mask
                 depthmap *= maskmap
 
-            rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(
-                rgb_image, depthmap, camera_intrinsics.copy(), resolution, rng=rng, info=impath)
+            rgb_image, depthmap, K, _, _, _, _ = self._crop_resize_if_necessary(
+                rgb_image, depthmap, camera_intrinsics, resolution, rng=rng, info=impath)
 
-            views.append(dict(
-                img=rgb_image,
-                depthmap=depthmap.astype(np.float32),
-                camera_pose=camera_pose.astype(np.float32),
-                camera_intrinsics=intrinsics.astype(np.float32),
-                dataset=self.dataset_label,
-                label=scene[0]+'-'+scene[1],
-                instance=osp.split(impath)[1],
-            ))
-        return views
+            pts3d_i, valid_mask_i, depthmap = self._process_depth(
+                depthmap, K, camera_pose,
+                label=f'{self.dataset_label}/{clip_label}', frame_id=str(idx))
+
+            images.append(self.transform(rgb_image))
+            depths.append(depthmap.astype(np.float32))
+            poses.append(camera_pose.astype(np.float32))
+            intrinsics.append(K)
+            instances.append(osp.split(impath)[1])
+            pts3d_list.append(pts3d_i)
+            valid_mask_list.append(valid_mask_i)
+
+        clip = UnifiedClip(
+            images=torch.stack(images, dim=0),
+            depths=np.stack(depths, axis=0),
+            camera_poses=np.stack(poses, axis=0),
+            intrinsics=np.stack(intrinsics, axis=0),
+            dataset=self.dataset_label,
+            label=clip_label,
+            instances=instances,
+            metadata={},
+        )
+        clip.pts3d = np.stack(pts3d_list, axis=0)
+        clip.valid_mask = np.stack(valid_mask_list, axis=0)
+        return clip
 
 
 if __name__ == '__main__':

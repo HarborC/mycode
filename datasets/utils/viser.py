@@ -1,14 +1,10 @@
 """Visualize views from any dataset.
 
 Usage:
-    # From any dataset that returns views with img/depthmap/camera_pose/camera_intrinsics
-    python datasets/utils/views_vis.py --dataset_module datasets.co3dv2_dataset --dataset_class CO3DV2Dataset --data_root /path/to/data --num_samples 5
-
-    # From another dataset
-    python datasets/utils/views_vis.py --dataset_module datasets.waymo_dataset --dataset_class WaymoDataset --data_root /path/to/data --num_samples 3
-
-    # Custom resolution
-    python datasets/utils/views_vis.py --dataset_module datasets.co3dv2_dataset --dataset_class CO3DV2Dataset --data_root /path/to/data --resolution '(512, 384)'
+    python -m datasets.utils.viser --help
+    # Or directly in code:
+    from datasets.utils.viser import visualize_dataset
+    visualize_dataset(dataset, start_idx=0)
 """
 
 import sys
@@ -132,36 +128,33 @@ def visualize_dataset(dataset, start_idx=0, share=False, point_size=0.01):
             dataset.frame_num = gui_frame_num.value
 
         print(f"Loading sample {dataset_idx} with {gui_frame_num.value} frames...")
-        views = dataset[dataset_idx]
-        for v in views:
-            for k in ('img', 'depthmap', 'camera_pose', 'camera_intrinsics', 'valid_mask'):
-                if k in v:
-                    v[k] = _to_numpy(v[k])
+        clip = dataset[dataset_idx]
+        T = clip.images.shape[0]
 
         gui_sample_label.content = f"**Sample**: {dataset_idx} / {len(dataset)-1}"
-        gui_frame_idx.max = max(len(views) - 1, 0)
+        gui_frame_idx.max = max(T - 1, 0)
         gui_frame_idx.value = 0
 
         meta_lines = []
-        for k in ['dataset', 'label', 'instance']:
-            if k in views[0]:
-                meta_lines.append(f"**{k}**: {views[0][k]}")
-        meta_lines.append(f"**frames**: {len(views)}")
+        meta_lines.append(f"**dataset**: {clip.dataset}")
+        meta_lines.append(f"**label**: {clip.label}")
+        meta_lines.append(f"**frames**: {T}")
         info_text = server.gui.add_markdown(" | ".join(meta_lines))
         all_info_text.append(info_text)
 
         point_nodes, frustum_nodes, frame_nodes = [], [], []
-        for i, view in enumerate(views):
-            rgb = view['img']
+        for i in range(T):
+            rgb = _to_numpy(clip.images[i])
             if rgb.ndim == 3 and rgb.shape[0] == 3:  # CHW -> HWC
                 rgb = rgb.transpose(1, 2, 0)
             if rgb.dtype != np.uint8:
                 rgb = (np.clip(rgb, 0, 1) * 255).astype(np.uint8) if rgb.max() <= 1.1 else rgb.astype(np.uint8)
 
-            depthmap = np.asarray(view['depthmap'], dtype=np.float32)
-            camera_pose = np.asarray(view['camera_pose'], dtype=np.float64)
-            intrinsics = np.asarray(view['camera_intrinsics'], dtype=np.float64)
-            valid_mask = view.get('valid_mask', depthmap > 0)
+            depthmap = np.asarray(clip.depths[i], dtype=np.float32)
+            camera_pose = np.asarray(clip.camera_poses[i], dtype=np.float64)
+            intrinsics = np.asarray(clip.intrinsics[i], dtype=np.float64)
+            valid_mask = clip.valid_mask[i] if clip.valid_mask is not None else (depthmap > 0)
+            valid_mask = np.asarray(valid_mask)
 
             pts, colors = depthmap_to_pointcloud(depthmap, intrinsics, camera_pose, rgb=rgb, valid_mask=valid_mask)
             if len(pts) == 0:
@@ -187,8 +180,8 @@ def visualize_dataset(dataset, start_idx=0, share=False, point_size=0.01):
             frustum_node.visible = gui_show_cameras.value
             frustum_nodes.append(frustum_node)
 
-            img_name = Path(view['img_path']).name if 'img_path' in view else ''
-            label_text = f"{i} {img_name}" if img_name else str(i)
+            inst = clip.instances[i] if i < len(clip.instances) else ''
+            label_text = f"{i} {inst}" if inst else str(i)
             server.scene.add_label(
                 f"/s/f{i}/label", text=label_text,
                 wxyz=tf.SO3.from_matrix(camera_pose[:3, :3]).wxyz,
@@ -208,8 +201,8 @@ def visualize_dataset(dataset, start_idx=0, share=False, point_size=0.01):
             fn.visible = True
 
         # Store first frame pose and update camera for already-connected clients
-        if len(views) > 0 and 'camera_pose' in views[0]:
-            first_frame_pose[0] = np.asarray(views[0]['camera_pose'], dtype=np.float64)
+        if T > 0:
+            first_frame_pose[0] = np.asarray(clip.camera_poses[0], dtype=np.float64)
             for client in server.get_clients().values():
                 _set_client_camera(client)
 

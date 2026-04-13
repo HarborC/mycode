@@ -139,7 +139,7 @@ class CatDataset (EasyDataset):
 
     def __repr__(self):
         # remove uselessly long transform
-        return ' + '.join(repr(dataset).replace(',transform=Compose( ToTensor() Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)))', '') for dataset in self.datasets)
+        return ' + '.join(repr(dataset).replace(',transform=Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))', '') for dataset in self.datasets)
 
     def set_epoch(self, epoch, base_seed=None):
         for dataset in self.datasets:
@@ -171,5 +171,5 @@ class CatDataset (EasyDataset):
         resolutions = self.datasets[0]._resolutions
         for dataset in self.datasets[1:]:
             # assert tuple(dataset._resolutions) == tuple(resolutions)
-            assert (dataset._resolutions == resolutions).all()            # adapte to numpy list
+            assert np.array_equal(dataset._resolutions, resolutions)
         return resolutions

@@ -1,16 +1,16 @@
 from .base.transforms import *
 
-from utils.misc import get_world_size, get_rank
-from torch.utils.data import DataLoader
-import hydra
-from datasets.base.base_dataset import sample_resolutions, unified_collate_fn
-from datasets.base.batched_sampler import DynamicBatchSampler, DynamicDistributedSampler
-
 __HIGH_QUALITY_DATASETS__ = ['BlinkVision', 'Game', 'GameNew', 'DynamicStereo', 'FlyingThings3D', 'GTA-sfm', 'Hypersim', 'MatrixCity', 'MidAir', 'Monkaa', 'PointOdyssey', 'Sintel', 'Spring', 'TarTanAir', 'Unreal4k', 'VirtualKitti', 'Habitat']
 __MIDDLE_QUALITY_DATASETS__ = ['BlendedMVG', 'BlendedMVS', 'DTU', 'ETH3D', 'ScanNet', 'Scannetpp', 'Taskonomy']
 __INDOOR_DATASETS__ = ['Hypersim', 'ScanNet', 'Scannetpp', 'Taskonomy', 'ARKitScenes', 'Habitat']
 
 def create_dataloader(cfg, mode):
+    from utils.misc import get_world_size, get_rank
+    from torch.utils.data import DataLoader
+    import hydra
+    from datasets.base.base_dataset import sample_resolutions, unified_collate_fn
+    from datasets.base.batched_sampler import DynamicBatchSampler, DynamicDistributedSampler
+
     data_loader = DataLoader
 
     # pytorch dataset
@@ -26,7 +26,8 @@ def create_dataloader(cfg, mode):
         num_workers = cfg.test.num_workers
 
     if isinstance(cfg_dataset, str):
-        dataset = eval(cfg_dataset) 
+        dataset = eval(cfg_dataset)
+        num_resolution = 1
     elif 'weights' in cfg_dataset:
         weights = cfg_dataset.weights
         if 'length' in cfg_dataset:
@@ -41,7 +42,7 @@ def create_dataloader(cfg, mode):
         datasets_all = []
 
         num_resolution = cfg.train.num_resolution if 'num_resolution' in cfg.train and mode == 'train' else 1
-        if mode == 'train' and 'random_reslution' in cfg.train and cfg.train.random_reslution:
+        if mode == 'train' and 'random_resolution' in cfg.train and cfg.train.random_resolution:
             seed = 777 + 0
             resolutions = sample_resolutions(aspect_ratio_range=cfg.train.aspect_ratio_range, pixel_count_range=cfg.train.pixel_count_range, patch_size=cfg.train.patch_size, num_resolutions=num_resolution, seed=seed)
             print('Initialized resolution', resolutions)
@@ -68,6 +69,7 @@ def create_dataloader(cfg, mode):
     else:
         dataset = hydra.utils.instantiate(cfg_dataset)
         dataset.convert_attributes()
+        num_resolution = 1
     world_size = get_world_size()
     rank = get_rank()
 

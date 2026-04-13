@@ -1,5 +1,5 @@
 import sys
-sys.path.append('.')
+sys.path.insert(0, '.')
 
 import json
 import os
@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 from pathlib import Path
 from datasets.base.base_dataset import BaseDataset
+from datasets.base.types import UnifiedClip
 from datasets.base.transforms import *
 
 # Enable OpenEXR support in OpenCV
@@ -32,11 +33,11 @@ class MVSSynthDataset(BaseDataset):
         self.data_root = Path(data_root)
 
         cache_path = f'data/dataset_cache/mvssynth_{self.mode}_cache.npy'
+        os.makedirs('data/dataset_cache', exist_ok=True)
         if not os.path.exists(cache_path):
             self.sequences = []
             self.num_frames = {}
 
-            # num_images.json: [100, 100, ..., 100], one entry per sequence
             num_images_path = self.data_root / "num_images.json"
             if num_images_path.exists():
                 with open(num_images_path, "r") as f:
@@ -73,32 +74,31 @@ class MVSSynthDataset(BaseDataset):
     def __len__(self):
         return len(self.sequences)
 
-    def _get_views(self, index, resolution, rng):
+    def _get_clip(self, index, resolution, rng):
         seq = self.sequences[index]
         seq_dir = self.data_root / seq
         T_total = self.num_frames[seq]
-        idxs = self._sample_frame_indices(T_total, rng)
+        frame_idxs = self._sample_frame_indices(T_total, rng)
 
-        # Read the first frame's pose to get the first camera centre for world centering
-        # (centering is done relative to the first *selected* frame below)
+        images, depths, poses, intrinsics = [], [], [], []
+        pts3d_list, valid_mask_list = [], []
+        instances = []
+        c0 = None
 
-        views = []
-        c0 = None  # first camera centre in world coords (for centering)
-        for i, idx in enumerate(idxs):
+        clip_label = seq
+
+        for i, idx in enumerate(frame_idxs):
             img_path   = seq_dir / "images" / f"{idx:04d}.png"
             depth_path = seq_dir / "depths" / f"{idx:04d}.exr"
             pose_path  = seq_dir / "poses"  / f"{idx:04d}.json"
 
-            # Load image
             img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
             rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-            # Load depth: EXR float32, unit cm -> m, inf -> 0
             dep = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED).astype(np.float32)
             dep[~np.isfinite(dep)] = 0.0
             dep /= 100.0
 
-            # Load pose
             with open(pose_path, "r") as f:
                 pose = json.load(f)
 
@@ -121,19 +121,34 @@ class MVSSynthDataset(BaseDataset):
 
             camera_pose = np.linalg.inv(w2c)  # c2w [4,4]
 
-            rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(
-                rgb_image, dep, K.copy(), resolution, rng=rng, info=str(img_path))
+            rgb_image, dep, K, _, _, _, _ = self._crop_resize_if_necessary(
+                rgb_image, dep, K, resolution, rng=rng, info=str(img_path))
 
-            views.append(dict(
-                img=rgb_image,
-                depthmap=depthmap.astype(np.float32),
-                camera_pose=camera_pose.astype(np.float32),
-                camera_intrinsics=intrinsics.astype(np.float32),
-                dataset=self.dataset_label,
-                label=seq,
-                instance=f"{idx:04d}",
-            ))
-        return views
+            pts3d_i, valid_mask_i, dep = self._process_depth(
+                dep, K, camera_pose,
+                label=f'{self.dataset_label}/{clip_label}', frame_id=f"{idx:04d}")
+
+            images.append(self.transform(rgb_image))
+            depths.append(dep.astype(np.float32))
+            poses.append(camera_pose.astype(np.float32))
+            intrinsics.append(K)
+            instances.append(f"{idx:04d}")
+            pts3d_list.append(pts3d_i)
+            valid_mask_list.append(valid_mask_i)
+
+        clip = UnifiedClip(
+            images=torch.stack(images, dim=0),
+            depths=np.stack(depths, axis=0),
+            camera_poses=np.stack(poses, axis=0),
+            intrinsics=np.stack(intrinsics, axis=0),
+            dataset=self.dataset_label,
+            label=clip_label,
+            instances=instances,
+            metadata={},
+        )
+        clip.pts3d = np.stack(pts3d_list, axis=0)
+        clip.valid_mask = np.stack(valid_mask_list, axis=0)
+        return clip
 
 
 if __name__ == '__main__':

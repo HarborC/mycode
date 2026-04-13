@@ -6,10 +6,9 @@
 # --------------------------------------------------------
 import numpy as np
 import torch
-# from torch.utils.data import BatchSampler
 
-from typing import Any, Callable, Generic, Iterable, List, Optional, TypeVar, Union
-from torch.utils.data import DataLoader, Dataset, DistributedSampler, IterableDataset, Sampler
+from typing import List, Optional
+from torch.utils.data import DistributedSampler, Sampler
 
 class BatchedRandomSampler:
     """ Random sampling under a constraint: each sample in the batch has the same feature, 
@@ -108,7 +107,7 @@ class DynamicBatchSampler(Sampler):
 
         Args:
             sampler: Instance of DynamicDistributedSampler.
-            aspect_ratio_range: List containing [min_aspect_ratio, max_aspect_ratio].
+            resolution_num: Number of resolution groups.
             image_num_range: List containing [min_images, max_images] per sample.
             epoch: Current epoch number.
             seed: Random seed for reproducibility.
@@ -146,7 +145,7 @@ class DynamicBatchSampler(Sampler):
         Args:
             epoch: The epoch number.
         """
-        # self.sampler.set_epoch(epoch)
+        self.sampler.set_epoch(epoch)
         self.epoch = epoch
         self.rng_rank = np.random.default_rng(epoch * 100 + base_seed + self.rank)
         self.rng = np.random.default_rng(epoch * 100 + base_seed)

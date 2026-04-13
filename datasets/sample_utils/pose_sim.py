@@ -1,16 +1,7 @@
 """
 Adapted from https://github.com/facebookresearch/vggt/issues/82
 """
-from typing import List
-import os
-import os.path as osp
 import numpy as np
-from scipy.spatial.transform import Rotation as R
-
-import glob
-import json
-import pdb
-import tqdm
 
 def rotation_angle(R1: np.ndarray, R2: np.ndarray) -> float:
     """

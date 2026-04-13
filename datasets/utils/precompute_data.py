@@ -46,14 +46,14 @@ def _process_sequence(args: tuple) -> tuple[str, str | None]:
         all_indices = list(range(num_frames))
         clip = adapter.load_clip(seq_name, all_indices)
 
-        depths     = clip.depths       # list[np.ndarray] [H,W]
+        depths     = clip.depths       # [T, H, W] ndarray
         intrinsics = clip.intrinsics   # [T,3,3]
         extrinsics = clip.extrinsics   # [T,4,4] w2c
 
         if depths is None:
             return seq_name, "no depth"
 
-        H, W = depths[0].shape
+        H, W = depths.shape[1], depths.shape[2]
 
         # ---- normals ----
         normals = compute_normals_sequence(depths, intrinsics)   # [T,H,W,3]

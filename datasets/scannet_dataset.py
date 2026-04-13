@@ -1,7 +1,8 @@
 import sys
-sys.path.append('.')
+sys.path.insert(0, '.')
 
 from datasets.base.base_dataset import BaseDataset
+from datasets.base.types import UnifiedClip
 import os
 import numpy as np
 import os.path as osp
@@ -15,7 +16,7 @@ class ScannetDataset(BaseDataset):
         self,
         data_root=None,
         verbose=False,
-        max_distance=240,                    # 80
+        max_distance=240,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -42,6 +43,7 @@ class ScannetDataset(BaseDataset):
         with open('data/scannet_invalid_list.json') as f:
             self.invalid_list = json.load(f)
 
+        os.makedirs('data/dataset_cache', exist_ok=True)
         if not os.path.exists(f'data/dataset_cache/scannetmv_{self.mode}_cache.npy'):
             self.num_imgs = {}
             for seq in tqdm(self.sequences):
@@ -54,11 +56,11 @@ class ScannetDataset(BaseDataset):
 
     def __len__(self):
         return len(self.sequences)
-                    
-    def _get_views(self, index, resolution, rng):
+
+    def _get_clip(self, index, resolution, rng):
         scene = self.sequences[index]
         num_imgs = self.num_imgs[scene]
-        valid_idxs = [i for i in range(num_imgs) if i not in self.invalid_list[scene]]
+        valid_idxs = [i for i in range(num_imgs) if i not in self.invalid_list.get(scene, [])]
         num_imgs = len(valid_idxs)
 
         if self.frame_num > 16 and rng.random() < self.random_sample_thres:
@@ -83,18 +85,18 @@ class ScannetDataset(BaseDataset):
                 num_additional_to_select = self.frame_num - 1
                 additional_selected_values = []
                 pool_for_others_values = [val for val in valid_indices]
-                pool_for_others_values.sort() 
+                pool_for_others_values.sort()
 
                 should_replace_for_others = len(pool_for_others_values) < num_additional_to_select
 
-                if not pool_for_others_values: 
+                if not pool_for_others_values:
                     if should_replace_for_others:
                         additional_selected_values = [ref_frame_val] * num_additional_to_select
                 else:
                     if not should_replace_for_others and len(pool_for_others_values) >= num_additional_to_select:
                         strata = np.array_split(pool_for_others_values, num_additional_to_select+1)
                         for stratum in strata:
-                            if len(stratum) > 0 and ref_frame_val not in stratum: 
+                            if len(stratum) > 0 and ref_frame_val not in stratum:
                                 additional_selected_values.append(rng.choice(stratum))
                     else:
                         additional_selected_values = list(rng.choice(
@@ -106,7 +108,6 @@ class ScannetDataset(BaseDataset):
                 idxs = [ref_frame_val, *additional_selected_values]
                 idxs = [valid_idxs[idx] for idx in idxs]
 
-
         self.this_views_info = dict(
             scene=scene,
             idxs=idxs,
@@ -117,35 +118,52 @@ class ScannetDataset(BaseDataset):
         with open(intrinsic_path, 'r') as f:
             intrinsic_text = f.read()
         intrinsic = np.array([float(x) for x in intrinsic_text.split()]).astype(np.float32).reshape(4, 4)[:3, :3]
-        
-        views = []
+
+        images, depths, poses, intrinsics = [], [], [], []
+        pts3d_list, valid_mask_list = [], []
+        instances = []
+
+        clip_label = scene
+
         for idx in idxs:
             impath = os.path.join(base_path, 'color', f'{idx}.jpg')
             disppath = os.path.join(base_path, 'depth', f'{idx}.png')
             annotation = os.path.join(base_path, 'pose', f'{idx}.txt')
 
-            # load camera params
             with open(annotation, 'r') as f:
                 camera_pose_text = f.read()
             camera_pose = np.array([float(x) for x in camera_pose_text.split()]).astype(np.float32).reshape(4, 4)
             assert np.isfinite(camera_pose).all(), 'Infinite in camera pose for view'
-            assert ~np.isnan(camera_pose).any(), 'NaN in camera pose for view'
+            assert not np.isnan(camera_pose).any(), 'NaN in camera pose for view'
 
-            rgb_image = np.array(Image.open(impath).resize((640, 480), resample=lanczos))
+            rgb_image = np.array(Image.open(impath))
+            depthmap = np.array(Image.open(disppath)).astype(np.float32) / 1000.
 
-            depthmap = Image.open(disppath).astype(np.float32) / 1000.
+            rgb_image, depthmap, K, _, _, _, _ = self._crop_resize_if_necessary(
+                rgb_image, depthmap, intrinsic, resolution, rng=rng, info=impath)
 
-            rgb_image, depthmap, intrinsic_ = self._crop_resize_if_necessary(
-                rgb_image, depthmap, intrinsic.copy(), resolution, rng=rng, info=impath)
+            pts3d_i, valid_mask_i, depthmap = self._process_depth(
+                depthmap, K, camera_pose,
+                label=f'{self.dataset_label}/{clip_label}', frame_id=str(idx))
 
-            views.append(dict(
-                img=rgb_image,
-                depthmap=depthmap,
-                camera_pose=camera_pose.astype(np.float32),
-                camera_intrinsics=intrinsic_.astype(np.float32),
-                dataset=self.dataset_label,
-                label=scene,
-                instance=str(idx),
-            ))
-        return views
+            images.append(self.transform(rgb_image))
+            depths.append(depthmap.astype(np.float32))
+            poses.append(camera_pose)
+            intrinsics.append(K)
+            instances.append(str(idx))
+            pts3d_list.append(pts3d_i)
+            valid_mask_list.append(valid_mask_i)
 
+        clip = UnifiedClip(
+            images=torch.stack(images, dim=0),
+            depths=np.stack(depths, axis=0),
+            camera_poses=np.stack(poses, axis=0),
+            intrinsics=np.stack(intrinsics, axis=0),
+            dataset=self.dataset_label,
+            label=clip_label,
+            instances=instances,
+            metadata={},
+        )
+        clip.pts3d = np.stack(pts3d_list, axis=0)
+        clip.valid_mask = np.stack(valid_mask_list, axis=0)
+        return clip

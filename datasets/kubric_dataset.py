@@ -1,7 +1,8 @@
 import sys
-sys.path.append('.')
+sys.path.insert(0, '.')
 
 from datasets.base.base_dataset import BaseDataset
+from datasets.base.types import UnifiedClip
 import os
 import numpy as np
 import os.path as osp
@@ -29,6 +30,7 @@ class KubricDataset(BaseDataset):
         self.data_root = Path(data_root)
 
         cache_path = f'data/dataset_cache/kubric_{self.mode}_cache.npy'
+        os.makedirs('data/dataset_cache', exist_ok=True)
         if not os.path.exists(cache_path):
             self.sequences = []
             for p in sorted(self.data_root.iterdir()):
@@ -57,62 +59,244 @@ class KubricDataset(BaseDataset):
     def __len__(self):
         return len(self.sequences)
 
-    def _get_views(self, index, resolution, rng):
-        seq = self.sequences[index]
+    def _get_clip(self, idx, resolution, rng):
+        seq = self.sequences[idx]
         scene_dir = self.data_root / seq
-        # Support nested structure: root/0001/0001/
         if (scene_dir / seq).is_dir():
             scene_dir = scene_dir / seq
 
+        # ---- Load camera params ----
         rank = np.load(scene_dir / f"{seq}_with_rank.npz", allow_pickle=True)
-        K = np.asarray(rank["shared_intrinsics"], dtype=np.float32)        # [3,3]
-        extrinsics_t34 = np.asarray(rank["extrinsics"], dtype=np.float32)  # [T,3,4], w2c
+        K_shared = np.asarray(rank["shared_intrinsics"], dtype=np.float32)        # [3,3]
+        extrinsics_t34 = np.asarray(rank["extrinsics"], dtype=np.float32)          # [T_total,3,4], w2c
 
         frame_files = sorted((scene_dir / "frames").glob("*.png"))
         T_total = len(frame_files)
-        idxs = self._sample_frame_indices(T_total, rng)
+        frame_idxs = self._sample_frame_indices(T_total, rng)
 
-        # Load dense depth maps — prefer h5 (depths/ dir), fall back to .npy
+        # ---- Load tracks and visibility ----
         h5_path = (scene_dir / f"{seq}.npy").with_suffix('.h5')
         if h5_path.exists():
-            depth_dir = scene_dir / "depths"
-            depth_files = sorted(depth_dir.glob("*.npy")) if depth_dir.exists() else []
-            def get_depth(i):
-                if depth_files:
-                    return np.load(depth_files[i]).astype(np.float32).squeeze()
-                return None
+            import h5py
+            with h5py.File(h5_path, 'r') as hf:
+                trajs_2d     = hf['trajs_2d'][frame_idxs]        # [T, N, 2]
+                coords_depth = hf['coords_depth'][frame_idxs]    # [T, N]
+                visibility   = hf['visibility'][frame_idxs]      # [T, N]
         else:
             ann = np.load(scene_dir / f"{seq}.npy", allow_pickle=True).item()
-            dense_depth = np.asarray(ann["depth"], dtype=np.float32)  # [T,H,W,1]
-            def get_depth(i):
-                return dense_depth[i, :, :, 0]
+            coords_nt2 = np.asarray(ann["coords"], dtype=np.float32)              # [N, T_total, 2]
+            visibility_nt = np.asarray(ann["visibility"], dtype=bool)             # [N, T_total]
 
-        views = []
-        for idx in idxs:
-            rgb_image = np.asarray(Image.open(frame_files[idx]).convert("RGB"))
+            trajs_2d = np.transpose(coords_nt2[:, frame_idxs, :], (1, 0, 2))    # [T, N, 2]
+            visibility = np.transpose(visibility_nt[:, frame_idxs], (1, 0))       # [T, N]
 
-            depthmap = get_depth(int(idx))
+            # Sample depth at track locations from dense depth maps
+            dense_depth_thw1 = np.asarray(ann["depth"], dtype=np.float32)          # [T_total, H, W, 1]
+            coords_depth = self._sample_depth_at_tracks(
+                coords_nt2, dense_depth_thw1, frame_idxs)                         # [T, N]
+
+        # ---- Compute initial valids before crop/resize ----
+        valids = (
+            np.isfinite(trajs_2d[..., 0])
+            & np.isfinite(trajs_2d[..., 1])
+            & np.isfinite(coords_depth)
+            & (coords_depth > 0)
+        )
+
+        # ---- Load dense depth maps (for image-level depth) ----
+        depth_dir = scene_dir / "depths"
+        depth_files = sorted(depth_dir.glob("*.npy")) if depth_dir.exists() else []
+        use_per_frame_depth = len(depth_files) > 0
+
+        # If h5 exists but no per-frame depth files, load dense depth from .npy annotation
+        if not use_per_frame_depth and h5_path.exists():
+            ann_for_depth = np.load(scene_dir / f"{seq}.npy", allow_pickle=True).item()
+            dense_depth_for_h5 = np.asarray(ann_for_depth["depth"], dtype=np.float32)  # [T, H, W, 1]
+        else:
+            dense_depth_for_h5 = None
+
+        images, depths, poses, intrinsics = [], [], [], []
+        pts3d_list, valid_mask_list = [], []
+        instances = []
+
+        clip_label = seq
+
+        for t_i, fi in enumerate(frame_idxs):
+            rgb_image = np.asarray(Image.open(frame_files[int(fi)]).convert("RGB"))
+
+            if use_per_frame_depth:
+                depthmap = np.load(depth_files[int(fi)]).astype(np.float32).squeeze()
+            elif not h5_path.exists():
+                depthmap = dense_depth_thw1[int(fi), :, :, 0]
+            elif dense_depth_for_h5 is not None:
+                depthmap = dense_depth_for_h5[int(fi), :, :, 0]
+            else:
+                depthmap = np.zeros(rgb_image.shape[:2], dtype=np.float32)
+
             if depthmap is None:
                 depthmap = np.zeros(rgb_image.shape[:2], dtype=np.float32)
 
-            # w2c [3,4] -> c2w [4,4]
             w2c = np.eye(4, dtype=np.float32)
-            w2c[:3, :4] = extrinsics_t34[idx]
+            w2c[:3, :4] = extrinsics_t34[int(fi)]
             camera_pose = np.linalg.inv(w2c)
 
-            rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(
-                rgb_image, depthmap, K.copy(), resolution, rng=rng, info=str(frame_files[idx]))
+            frame_trajs = trajs_2d[t_i].copy().astype(np.float32)
+            frame_valids = valids[t_i].copy()
 
-            views.append(dict(
-                img=rgb_image,
-                depthmap=depthmap.astype(np.float32),
-                camera_pose=camera_pose.astype(np.float32),
-                camera_intrinsics=intrinsics.astype(np.float32),
-                dataset=self.dataset_label,
-                label=seq,
-                instance=frame_files[idx].name,
-            ))
-        return views
+            rgb_image, depthmap, K, _, _, frame_trajs, frame_valids = self._crop_resize_if_necessary(
+                rgb_image, depthmap, K_shared.copy(), resolution,
+                rng=rng, info=str(frame_files[int(fi)]),
+                trajs_2d=frame_trajs, valids=frame_valids)
+
+            pts3d_i, valid_mask_i, depthmap = self._process_depth(
+                depthmap, K, camera_pose,
+                label=f'{self.dataset_label}/{clip_label}', frame_id=str(int(fi)))
+
+            images.append(self.transform(rgb_image))
+            depths.append(depthmap.astype(np.float32))
+            poses.append(camera_pose.astype(np.float32))
+            intrinsics.append(K)
+            instances.append(frame_files[int(fi)].name)
+            pts3d_list.append(pts3d_i)
+            valid_mask_list.append(valid_mask_i)
+
+            trajs_2d[t_i] = frame_trajs
+            valids[t_i] = frame_valids
+
+        camera_poses = np.stack(poses, axis=0)
+        intrinsics_arr = np.stack(intrinsics, axis=0)
+
+        # ---- Build extrinsics [T, 4, 4] w2c ----
+        extrinsics_w2c = np.zeros((len(frame_idxs), 4, 4), dtype=np.float32)
+        extrinsics_w2c[:, :3, :4] = extrinsics_t34[frame_idxs]
+        extrinsics_w2c[:, 3, 3] = 1.0
+
+        # ---- Backproject tracks to world coords (using cropped intrinsics) ----
+        trajs_3d_world = self._backproject_tracks_to_world(
+            trajs_2d=trajs_2d,
+            coords_depth=coords_depth,
+            intrinsics=intrinsics_arr,
+            extrinsics_w2c=extrinsics_w2c,
+        )
+
+        clip = UnifiedClip(
+            images=torch.stack(images, dim=0),
+            depths=np.stack(depths, axis=0),
+            camera_poses=camera_poses,
+            intrinsics=intrinsics_arr,
+            trajs_2d=trajs_2d,
+            trajs_3d_world=trajs_3d_world,
+            visibility=visibility,
+            valids=valids,
+            dataset=self.dataset_label,
+            label=clip_label,
+            instances=instances,
+            metadata={
+                'has_tracks': True,
+                'has_visibility': True,
+                'has_trajs_3d_world': True,
+            },
+        )
+        clip.pts3d = np.stack(pts3d_list, axis=0)
+        clip.valid_mask = np.stack(valid_mask_list, axis=0)
+        return clip
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sample_depth_at_tracks(
+        coords_nt2: np.ndarray,
+        dense_depth: np.ndarray,
+        frame_idxs: np.ndarray,
+    ) -> np.ndarray:
+        """Sample dense depth maps at track 2D coordinates.
+
+        Args:
+            coords_nt2: [N, T_total, 2] float32 pixel coordinates.
+            dense_depth: [T_total, H, W, 1] float32 depth maps.
+            frame_idxs: array of selected frame indices.
+
+        Returns:
+            coords_depth: [len(frame_idxs), N] float32 depth at each track.
+        """
+        N, T_total, _ = coords_nt2.shape
+        H, W = dense_depth.shape[1], dense_depth.shape[2]
+        T = len(frame_idxs)
+        coords_depth = np.full((T, N), np.nan, dtype=np.float32)
+
+        for t_idx, fi in enumerate(frame_idxs):
+            depth_map = dense_depth[int(fi), :, :, 0]  # [H, W]
+            xy = coords_nt2[:, int(fi), :]             # [N, 2]
+
+            # Round to nearest pixel
+            ix = np.clip(np.round(xy[:, 0]).astype(np.int32), 0, W - 1)
+            iy = np.clip(np.round(xy[:, 1]).astype(np.int32), 0, H - 1)
+
+            vals = depth_map[iy, ix]
+            coords_depth[t_idx] = vals
+
+        return coords_depth
+
+    @staticmethod
+    def _backproject_tracks_to_world(
+        trajs_2d: np.ndarray,
+        coords_depth: np.ndarray,
+        intrinsics: np.ndarray,
+        extrinsics_w2c: np.ndarray,
+    ) -> np.ndarray:
+        """Reconstruct world-space track points from 2D coords + depth + K + w2c.
+
+        Args:
+            trajs_2d: [T, N, 2] float32 pixel coords.
+            coords_depth: [T, N] float32 depth (ray distance).
+            intrinsics: [T, 3, 3] pinhole intrinsics.
+            extrinsics_w2c: [T, 4, 4] world-to-camera.
+
+        Returns:
+            trajs_3d_world: [T, N, 3] float32.
+        """
+        T, N, _ = trajs_2d.shape
+        trajs_3d_world = np.full((T, N, 3), np.nan, dtype=np.float32)
+
+        for t in range(T):
+            uv = trajs_2d[t]            # [N, 2]
+            z = coords_depth[t]         # [N]
+            K = intrinsics[t]           # [3, 3]
+            w2c = extrinsics_w2c[t]     # [4, 4]
+
+            valid = (
+                np.isfinite(uv[:, 0])
+                & np.isfinite(uv[:, 1])
+                & np.isfinite(z)
+                & (z > 0)
+            )
+            if not np.any(valid):
+                continue
+
+            uv_valid = uv[valid]
+            z_valid = z[valid]
+
+            ones = np.ones((uv_valid.shape[0], 1), dtype=np.float32)
+            pix = np.concatenate([uv_valid, ones], axis=-1)  # [M, 3]
+
+            K_inv = np.linalg.inv(K).astype(np.float32)
+            rays = (K_inv @ pix.T).T                          # [M, 3]
+            ray_len = np.linalg.norm(rays, axis=1)
+            z_cam = z_valid / ray_len
+            pts_cam = rays * z_cam[:, None]
+
+            pts_cam_h = np.concatenate(
+                [pts_cam, np.ones((pts_cam.shape[0], 1), dtype=np.float32)],
+                axis=-1,
+            )
+
+            c2w = np.linalg.inv(w2c).astype(np.float32)
+            pts_world_h = (c2w @ pts_cam_h.T).T
+            trajs_3d_world[t, valid] = pts_world_h[:, :3]
+
+        return trajs_3d_world
 
 
 if __name__ == '__main__':

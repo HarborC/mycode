@@ -1,5 +1,5 @@
 import sys
-sys.path.append('.')
+sys.path.insert(0, '.')
 
 import re
 import os
@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
 from datasets.base.base_dataset import BaseDataset
+from datasets.base.types import UnifiedClip
 from datasets.base.transforms import *
 
 _CAM_RE = re.compile(r"^(\d+)_cam\.txt$")
@@ -86,6 +87,7 @@ class BlendedMVSDataset(BaseDataset):
             raise FileNotFoundError(f"Split list not found: {list_path}")
 
         cache_path = f'data/dataset_cache/blendedmvs_{self.mode}_cache.npy'
+        os.makedirs('data/dataset_cache', exist_ok=True)
         if not os.path.exists(cache_path):
             with open(list_path, "r") as f:
                 scene_ids = [ln.strip() for ln in f if ln.strip()]
@@ -121,15 +123,20 @@ class BlendedMVSDataset(BaseDataset):
     def __len__(self):
         return len(self.sequences)
 
-    def _get_views(self, index, resolution, rng):
+    def _get_clip(self, index, resolution, rng):
         scene_id = self.sequences[index]
         scene_dir = self.data_root / scene_id
         fids = self.frame_ids[scene_id]
         T_total = len(fids)
-        idxs = self._sample_frame_indices(T_total, rng)
+        frame_idxs = self._sample_frame_indices(T_total, rng)
 
-        views = []
-        for idx in idxs:
+        images, depths, poses, intrinsics = [], [], [], []
+        pts3d_list, valid_mask_list = [], []
+        instances = []
+
+        clip_label = scene_id
+
+        for idx in frame_idxs:
             fid = fids[idx]
             img_suffix = f"{fid}_masked.jpg" if self.use_masked else f"{fid}.jpg"
             img_path   = scene_dir / "blended_images" / img_suffix
@@ -142,19 +149,34 @@ class BlendedMVSDataset(BaseDataset):
             w2c, K = _parse_cam_file(cam_path)
             camera_pose = np.linalg.inv(w2c)   # c2w [4,4]
 
-            rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(
-                rgb_image, depthmap, K.copy(), resolution, rng=rng, info=str(img_path))
+            rgb_image, depthmap, K, _, _, _, _ = self._crop_resize_if_necessary(
+                rgb_image, depthmap, K, resolution, rng=rng, info=str(img_path))
 
-            views.append(dict(
-                img=rgb_image,
-                depthmap=depthmap.astype(np.float32),
-                camera_pose=camera_pose.astype(np.float32),
-                camera_intrinsics=intrinsics.astype(np.float32),
-                dataset=self.dataset_label,
-                label=scene_id,
-                instance=fid,
-            ))
-        return views
+            pts3d_i, valid_mask_i, depthmap = self._process_depth(
+                depthmap, K, camera_pose,
+                label=f'{self.dataset_label}/{clip_label}', frame_id=str(fid))
+
+            images.append(self.transform(rgb_image))
+            depths.append(depthmap.astype(np.float32))
+            poses.append(camera_pose.astype(np.float32))
+            intrinsics.append(K)
+            instances.append(fid)
+            pts3d_list.append(pts3d_i)
+            valid_mask_list.append(valid_mask_i)
+
+        clip = UnifiedClip(
+            images=torch.stack(images, dim=0),
+            depths=np.stack(depths, axis=0),
+            camera_poses=np.stack(poses, axis=0),
+            intrinsics=np.stack(intrinsics, axis=0),
+            dataset=self.dataset_label,
+            label=clip_label,
+            instances=instances,
+            metadata={},
+        )
+        clip.pts3d = np.stack(pts3d_list, axis=0)
+        clip.valid_mask = np.stack(valid_mask_list, axis=0)
+        return clip
 
 
 if __name__ == '__main__':

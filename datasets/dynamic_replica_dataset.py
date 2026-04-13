@@ -1,5 +1,5 @@
 import sys
-sys.path.append('.')
+sys.path.insert(0, '.')
 
 import gzip
 import json
@@ -9,6 +9,7 @@ from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
 from datasets.base.base_dataset import BaseDataset
+from datasets.base.types import UnifiedClip
 from datasets.base.transforms import *
 
 
@@ -17,7 +18,7 @@ from datasets.base.transforms import *
 # ---------------------------------------------------------------------------
 
 def _ndc_to_pinhole(focal_length, principal_point, image_size):
-    """Convert PyTorch3D NDC intrinsics to a standard 3×3 pinhole matrix."""
+    """Convert PyTorch3D NDC intrinsics to a standard 3x3 pinhole matrix."""
     H, W = float(image_size[0]), float(image_size[1])
     half_s = min(H, W) / 2.0
     fx = focal_length[0] * half_s
@@ -33,7 +34,7 @@ def _ndc_to_pinhole(focal_length, principal_point, image_size):
 
 
 def _p3d_to_opencv_w2c(R_p3d, T_p3d):
-    """Convert PyTorch3D R/T to a 4×4 OpenCV-style world-to-camera matrix."""
+    """Convert PyTorch3D R/T to a 4x4 OpenCV-style world-to-camera matrix."""
     R = np.array(R_p3d, dtype=np.float64)
     T = np.array(T_p3d, dtype=np.float64)
     D = np.diag([-1.0, -1.0, 1.0])
@@ -50,13 +51,8 @@ def _p3d_to_opencv_w2c(R_p3d, T_p3d):
 # ---------------------------------------------------------------------------
 
 def _load_depth(path):
-    """Load 16-bit PNG depth map stored as float16.
-
-    Dynamic Replica stores depth as float16 values packed into uint16 PNG.
-    We need to reinterpret the bytes, not scale them.
-    """
+    """Load 16-bit PNG depth map stored as float16."""
     with Image.open(path) as depth_pil:
-        # PIL reads as I (32 bit), cast to uint16, reinterpret as float16, then float32
         depth = (
             np.frombuffer(np.array(depth_pil, dtype=np.uint16), dtype=np.float16)
             .astype(np.float32)
@@ -91,14 +87,13 @@ class DynamicReplicaDataset(BaseDataset):
         if not self.split_root.exists():
             raise FileNotFoundError(f"Split root not found: {self.split_root}")
 
-        # Load annotation index (lazy-ish: done once at init)
         anno_file = self.split_root / f"frame_annotations_{self.mode}.jgz"
         if not anno_file.exists():
             raise FileNotFoundError(f"Annotation file not found: {anno_file}")
 
         cache_path = f'data/dataset_cache/dynamic_replica_{self.mode}_cache.npy'
+        os.makedirs('data/dataset_cache', exist_ok=True)
         if not os.path.exists(cache_path):
-            # Build annotation index: (base_seq, camera, frame_number) -> entry
             with gzip.open(anno_file, "rb") as f:
                 raw_anno = json.load(f)
             anno_index = {}
@@ -106,15 +101,15 @@ class DynamicReplicaDataset(BaseDataset):
                 key = (entry["sequence_name"], entry["camera_name"], int(entry["frame_number"]))
                 anno_index[key] = entry
 
-            self.sequences = []       # list of sequence dir names (left camera only)
-            self.num_frames = {}      # seq_name -> int
-            self.frame_numbers = {}   # seq_name -> list[int]
+            self.sequences = []
+            self.num_frames = {}
+            self.frame_numbers = {}
 
             for seq_dir in tqdm(sorted(self.split_root.iterdir())):
                 if not seq_dir.is_dir() or "_source_" not in seq_dir.name:
                     continue
                 base_name, _, camera = seq_dir.name.rpartition("_source_")
-                if camera != "left":          # only left camera sequences
+                if camera != "left":
                     continue
                 if not (seq_dir / "images").exists():
                     continue
@@ -131,7 +126,6 @@ class DynamicReplicaDataset(BaseDataset):
                 self.num_frames[seq] = len(fns)
                 self.frame_numbers[seq] = fns
 
-            # Cache without depth_params
             np.save(cache_path, dict(
                 sequences=self.sequences,
                 num_frames=self.num_frames,
@@ -143,7 +137,6 @@ class DynamicReplicaDataset(BaseDataset):
             self.num_frames   = npy['num_frames']
             self.frame_numbers = npy['frame_numbers']
 
-        # Annotation index needed at _get_views time — load lazily
         self._anno_file  = anno_file
         self._anno_index = None
 
@@ -155,18 +148,23 @@ class DynamicReplicaDataset(BaseDataset):
     def __len__(self):
         return len(self.sequences)
 
-    def _get_views(self, index, resolution, rng):
+    def _get_clip(self, index, resolution, rng):
         seq = self.sequences[index]
         seq_dir = self.split_root / seq
         base_name, _, camera = seq.rpartition("_source_")
         fns = self.frame_numbers[seq]
         T_total = len(fns)
-        idxs = self._sample_frame_indices(T_total, rng)
+        frame_idxs = self._sample_frame_indices(T_total, rng)
 
         self._ensure_anno_loaded()
 
-        views = []
-        for idx in idxs:
+        images, depths, poses, intrinsics = [], [], [], []
+        pts3d_list, valid_mask_list = [], []
+        instances = []
+
+        clip_label = seq
+
+        for idx in frame_idxs:
             fn = fns[idx]
             anno = self._anno_index[(base_name, camera, fn)]
 
@@ -187,23 +185,34 @@ class DynamicReplicaDataset(BaseDataset):
             )
             camera_pose = np.linalg.inv(w2c)   # c2w [4,4]
 
-            rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(
-                rgb_image, depthmap, K.copy(), resolution, rng=rng, info=str(img_path))
+            rgb_image, depthmap, K, _, _, _, _ = self._crop_resize_if_necessary(
+                rgb_image, depthmap, K, resolution, rng=rng, info=str(img_path))
 
-            views.append(dict(
-                img=rgb_image,
-                depthmap=depthmap.astype(np.float32),
-                camera_pose=camera_pose.astype(np.float32),
-                camera_intrinsics=intrinsics.astype(np.float32),
-                dataset=self.dataset_label,
-                label=seq,
-                instance=str(fn),
-            ))
-        return views
+            pts3d_i, valid_mask_i, depthmap = self._process_depth(
+                depthmap, K, camera_pose,
+                label=f'{self.dataset_label}/{clip_label}', frame_id=str(fn))
 
-    # ------------------------------------------------------------------
-    # Annotation index (loaded once on first access)
-    # ------------------------------------------------------------------
+            images.append(self.transform(rgb_image))
+            depths.append(depthmap.astype(np.float32))
+            poses.append(camera_pose.astype(np.float32))
+            intrinsics.append(K)
+            instances.append(str(fn))
+            pts3d_list.append(pts3d_i)
+            valid_mask_list.append(valid_mask_i)
+
+        clip = UnifiedClip(
+            images=torch.stack(images, dim=0),
+            depths=np.stack(depths, axis=0),
+            camera_poses=np.stack(poses, axis=0),
+            intrinsics=np.stack(intrinsics, axis=0),
+            dataset=self.dataset_label,
+            label=clip_label,
+            instances=instances,
+            metadata={},
+        )
+        clip.pts3d = np.stack(pts3d_list, axis=0)
+        clip.valid_mask = np.stack(valid_mask_list, axis=0)
+        return clip
 
     def _ensure_anno_loaded(self):
         if self._anno_index is not None:

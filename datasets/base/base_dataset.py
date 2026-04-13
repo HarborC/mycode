@@ -1,10 +1,13 @@
 from datasets.base.easy_dataset import EasyDataset
+from datasets.base.types import UnifiedClip
 from utils.geometry import depthmap_to_absolute_camera_coordinates
 import numpy as np
 import os
 import PIL
 import utils.cropping as cropping
 import torchvision.transforms as tvf
+import torchvision.transforms.v2 as tv2
+import torch
 from omegaconf import OmegaConf
 from .transforms import *
 import pandas as pd
@@ -80,7 +83,6 @@ class BaseDataset(EasyDataset):
         cache_name=None,
         max_refetch=3,
         random_sample_thres=0.1,
-        shuffle=False,
         use_sparse_depth=False,
         sampling_mode='random',     # 'random' or 'stride'
     ):
@@ -89,8 +91,6 @@ class BaseDataset(EasyDataset):
         self.sampling_mode = sampling_mode
 
         self.transform = transform
-
-        self.shuffle = shuffle
 
         self.use_sparse_depth = use_sparse_depth
 
@@ -217,60 +217,110 @@ class BaseDataset(EasyDataset):
             # self._resolutions.append((width, height))
             self._resolutions.append([width, height])
 
-        self.num_resoluions = len(self._resolutions)
+        self.num_resolutions = len(self._resolutions)
 
-    def _crop_resize_if_necessary(self, image, depthmap, intrinsics, resolution, rng=None, info=None, normal=None, far_mask=None):
-        """ This function:
-            - first downsizes the image with LANCZOS inteprolation,
-              which is better than bilinear interpolation in
+    def _get_clip(self, idx, resolution, rng) -> UnifiedClip:
+        """Load and transform data for a sequence. Subclasses must override.
+
+        Should call _crop_resize_if_necessary per frame to apply crop/resize
+        and return a UnifiedClip at the target resolution.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must implement _get_clip()"
+        )
+
+    def _crop_resize_if_necessary(self, image, depthmap, intrinsics, resolution, rng=None, info='', normal=None, far_mask=None, trajs_2d=None, valids=None):
+        """Crop/resize a single frame, synchronously transforming tracks and valids.
+
+        Steps:
+            1. Principal-point centered crop (symmetric around optical center)
+            2. Optional random focal augmentation (center crop)
+            3. Lanczos rescale to target resolution
+            4. Final center crop to exact resolution
+
+        Track/valids transforms are handled by cropping functions.
+
+        Args:
+            image: PIL Image or numpy array [H, W, 3]
+            depthmap: numpy array [H, W]
+            intrinsics: numpy array [3, 3]
+            resolution: target (width, height)
+            rng: numpy RNG for augmentation
+            info: string for error messages
+            trajs_2d: numpy array [N, 2] or None
+            valids: numpy array [N] bool or None
+
+        Returns:
+            (image, depthmap, intrinsics, trajs_2d, valids)
         """
         if not isinstance(image, PIL.Image.Image):
             image = PIL.Image.fromarray(image)
 
-        # downscale with lanczos interpolation so that image.size == resolution
-        # cropping centered on the principal point
+        target_resolution = np.array(resolution)
+
+        # --- Step 1: principal-point centered crop ---
         W, H = image.size
         cx, cy = intrinsics[:2, 2].round().astype(int)
         min_margin_x = min(cx, W-cx)
         min_margin_y = min(cy, H-cy)
         assert min_margin_x > W/5, f'Bad principal point in view={info}'
         assert min_margin_y > H/5, f'Bad principal point in view={info}'
-        # the new window will be a rectangle of size (2*min_margin_x, 2*min_margin_y) centered on (cx,cy)
         l, t = cx - min_margin_x, cy - min_margin_y
         r, b = cx + min_margin_x, cy + min_margin_y
         crop_bbox = (l, t, r, b)
-        image, depthmap, intrinsics, normal, far_mask = cropping.crop_image_depthmap(image, depthmap, intrinsics, crop_bbox, normal=normal)
+        image, depthmap, intrinsics, normal, far_mask, trajs_2d, valids = cropping.crop_image_depthmap(
+            crop_bbox, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, valids=valids)
 
-        # transpose the resolution if necessary
-        W, H = image.size  # new size
-        # NOTE: Here we don't care about portrait image.
-        # assert resolution[0] >= resolution[1]
-        # if H > 1.1*W:
-        #     # image is portrait mode
-        #     resolution = resolution[::-1]
-        # elif 0.9 < H/W < 1.1 and resolution[0] != resolution[1]:
-        #     # image is square, so we chose (portrait, landscape) randomly
-        #     if rng.integers(2):
-        #         resolution = resolution[::-1]
+        W, H = image.size  # size after principal-point crop
 
-        # high-quality Lanczos down-scaling
-        target_resolution = np.array(resolution)
+        # --- Step 2: optional focal augmentation (center crop) ---
         if self.aug_focal:
-            crop_scale = self.aug_focal + (1.0 - self.aug_focal) * np.random.beta(0.5, 0.5) # beta distribution, bi-modal
-            image, depthmap, intrinsics, normal, far_mask = cropping.center_crop_image_depthmap(image, depthmap, intrinsics, crop_scale, normal=normal, far_mask=far_mask)
+            crop_scale = self.aug_focal + (1.0 - self.aug_focal) * rng.beta(0.5, 0.5) if rng is not None else self.aug_focal
+            image, depthmap, intrinsics, normal, far_mask, trajs_2d, valids = cropping.center_crop_image_depthmap(
+                crop_scale, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, valids=valids)
 
+        # --- Step 3: Lanczos rescale ---
         if self.aug_crop > 1:
-            target_resolution += rng.integers(0, self.aug_crop)
-        image, depthmap, intrinsics, normal, far_mask = cropping.rescale_image_depthmap(image, depthmap, intrinsics, target_resolution, normal=normal, far_mask=far_mask) # slightly scale the image a bit larger than the target resolution
+            target_resolution = target_resolution + rng.integers(0, self.aug_crop)
+            image, depthmap, intrinsics, normal, far_mask, trajs_2d, valids = cropping.rescale_image_depthmap(
+            target_resolution, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, valids=valids)
 
-        # actual cropping (if necessary) with bilinear interpolation
+        # --- Step 4: final center crop to exact resolution ---
         intrinsics2 = cropping.camera_matrix_of_crop(intrinsics, image.size, resolution, offset_factor=0.5)
         crop_bbox = cropping.bbox_from_intrinsics_in_out(intrinsics, intrinsics2, resolution)
-        image, depthmap, intrinsics2, normal, far_mask = cropping.crop_image_depthmap(image, depthmap, intrinsics, crop_bbox, normal=normal, far_mask=far_mask)
+        image, depthmap, intrinsics2, normal, far_mask, trajs_2d, valids = cropping.crop_image_depthmap(
+            crop_bbox, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, valids=valids)
 
-        other = [x for x in [normal, far_mask] if x is not None]
-        return image, depthmap, intrinsics2, *other
-    
+        return image, depthmap, intrinsics2, normal, far_mask, trajs_2d, valids
+
+    def _process_depth(self, depthmap, intrinsics, camera_pose, label='', frame_id=''):
+        """Compute pts3d and valid_mask for a single frame.
+
+        Args:
+            depthmap: numpy [H, W]
+            intrinsics: numpy [3, 3]
+            camera_pose: numpy [4, 4]
+            label: dataset/scene label for error messages
+            frame_id: frame identifier for error messages
+
+        Returns:
+            (pts3d, valid_mask, depthmap) where invalid depths are zeroed.
+        """
+        assert np.isfinite(depthmap).all(), f'NaN in depthmap for frame {frame_id}'
+        pts3d, valid_mask = depthmap_to_absolute_camera_coordinates(
+            depthmap=depthmap,
+            camera_intrinsics=intrinsics,
+            camera_pose=camera_pose,
+            z_far=self.z_far,
+        )
+        valid_mask = valid_mask & np.isfinite(pts3d).all(axis=-1)
+        depthmap[~valid_mask] = 0.0
+        if valid_mask.sum() == 0:
+            raise ValueError(
+                f"All pixels invalid in depthmap for frame {frame_id} of {label}"
+            )
+        return pts3d, valid_mask, depthmap
+
     def __getitem__(self, idx):
         if isinstance(idx, tuple):
             # the idx is specifying the aspect-ratio
@@ -285,70 +335,20 @@ class BaseDataset(EasyDataset):
 
         # over-loaded code
         resolution = self._resolutions[ar_idx]  # DO NOT CHANGE THIS (compatible with BatchedRandomSampler)
-        
+
         error = None
-        for _ in range(10):              # default: 3
+        for _ in range(10):
             try:
-                views = self._get_views(idx, resolution, self._rng)
+                clip = self._get_clip(idx, resolution, self._rng)
+                T = clip.images.shape[0]
+                h, w = clip.images.shape[-2:]  # [T, 3, H, W] -> H, W
+                clip.true_shape = np.array([[h, w]] * T, dtype=np.int32)
+                clip.z_far = self.z_far
+                clip.idx = (idx, ar_idx)
 
-                # assert len(views) == self.frame_num
-                if self.shuffle:
-                    self._rng.shuffle(views)
-
-                # check data-types
-                for v, view in enumerate(views):
-                    assert 'pts3d' not in view, f"pts3d should not be there, they will be computed afterwards based on intrinsics+depthmap for view {view_name(view)}"
-                    view['idx'] = (idx, ar_idx, v)
-                    # view['idx'] = (idx, v)
-
-                    # encode the image
-                    width, height = view['img'].size
-                    view['true_shape'] = np.int32((height, width))
-
-                    assert 'camera_intrinsics' in view
-                    if 'camera_pose' not in view:
-                        view['camera_pose'] = np.full((4, 4), np.nan, dtype=np.float32)
-                    else:
-                        assert np.isfinite(view['camera_pose']).all(), f'NaN in camera pose for view {view_name(view)}'
-                    assert 'pts3d' not in view
-                    assert 'valid_mask' not in view
-                    assert np.isfinite(view['depthmap']).all(), f'NaN in depthmap for view {view_name(view)}'
-                    view['z_far'] = self.z_far
-                    pts3d, valid_mask = depthmap_to_absolute_camera_coordinates(**view)
-
-                    view['pts3d'] = pts3d
-                    view['valid_mask'] = valid_mask & np.isfinite(pts3d).all(axis=-1)
-
-                    view['depthmap'][~view['valid_mask']] = 0.0
-
-                    assert view['valid_mask'].sum() > 0
-
-                    if 'normal' not in view:
-                        view['normal'] = None
-
-                    # # check all datatypes
-                    # for key, val in view.items():
-                    #     res, err_msg = is_good_type(key, val)
-                    #     assert res, f"{err_msg} with {key}={val} for view {view_name(view)}"
-                    # K = view['camera_intrinsics']
-
-                for view in views:
-                    view['img'] = self.transform(view['img'])
-
-                # # last thing done!
-                # for view in views:
-                #     # transpose to make sure all views are the same size
-                #     # transpose_to_landscape(view)  # NOTE: Here we don't care about portrait image.
-                #     # this allows to check whether the RNG is is the same state each time
-                #     view['rng'] = int.from_bytes(self._rng.bytes(4), 'big')
-
-                # overlap = self.check_overlap(views)
-
-                # if overlap is False:
-                #     raise ValueError("Views are not overlapped!")
+                return clip
 
             except Exception as e:
-                views = None
                 if hasattr(self, 'this_views_info'):
                     print(
                         f"Failed to load data from {self.dataset_label}-{idx} ({self.this_views_info}) for error {e}.", flush=True
@@ -359,15 +359,8 @@ class BaseDataset(EasyDataset):
                     )
                 idx = np.random.randint(0, len(self))
                 error = e
-            
-            if views is not None:
-                error = None
-                break
 
-        if views is None:
-            raise error
-        
-        return views
+        raise error
     
     def load_cache(self, cache_file):
         try:

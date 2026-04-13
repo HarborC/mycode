@@ -53,7 +53,7 @@ class ImageList:
         return [getattr(im, func)(*args, **kwargs) for im in self.images]
 
 
-def rescale_image_depthmap(image, depthmap, camera_intrinsics, output_resolution, force=True, normal=None, far_mask=None):
+def rescale_image_depthmap(output_resolution, image, depthmap, camera_intrinsics, force=True, normal=None, far_mask=None, trajs_2d=None, valids=None):
     """ Jointly rescale a (image, depthmap) 
         so that (out_width, out_height) >= output_res
     """
@@ -88,9 +88,13 @@ def rescale_image_depthmap(image, depthmap, camera_intrinsics, output_resolution
     camera_intrinsics = camera_matrix_of_crop(
         camera_intrinsics, input_resolution, output_resolution, scaling=scale_final)
 
-    return image.to_pil(), depthmap, camera_intrinsics, normal, far_mask
+    if trajs_2d is not None:
+        trajs_2d[:, 0] *= scale_final
+        trajs_2d[:, 1] *= scale_final
 
-def center_crop_image_depthmap(image, depthmap, camera_intrinsics, crop_scale, normal=None, far_mask=None):
+    return image.to_pil(), depthmap, camera_intrinsics, normal, far_mask, trajs_2d, valids
+
+def center_crop_image_depthmap(crop_scale, image, depthmap, camera_intrinsics, normal=None, far_mask=None, trajs_2d=None, valids=None):
     """
     Jointly center-crop an image and its depthmap, and adjust the camera intrinsics accordingly.
 
@@ -150,7 +154,17 @@ def center_crop_image_depthmap(image, depthmap, camera_intrinsics, crop_scale, n
     adjusted_intrinsics[0, 2] -= l  # cx
     adjusted_intrinsics[1, 2] -= t  # cy
 
-    return image.to_pil(), depthmap, adjusted_intrinsics, normal, far_mask
+    if trajs_2d is not None:
+        trajs_2d[:, 0] -= l
+        trajs_2d[:, 1] -= t
+        if valids is not None:
+            in_bounds = (
+                (trajs_2d[:, 0] >= 0) & (trajs_2d[:, 0] < output_resolution[0]) &
+                (trajs_2d[:, 1] >= 0) & (trajs_2d[:, 1] < output_resolution[1])
+            )
+            valids = valids & in_bounds
+
+    return image.to_pil(), depthmap, adjusted_intrinsics, normal, far_mask, trajs_2d, valids
 
 
 def camera_matrix_of_crop(input_camera_matrix, input_resolution, output_resolution, scaling=1, offset_factor=0.5, offset=None):
@@ -169,12 +183,13 @@ def camera_matrix_of_crop(input_camera_matrix, input_resolution, output_resoluti
     return output_camera_matrix
 
 
-def crop_image_depthmap(image, depthmap, camera_intrinsics, crop_bbox, normal=None, far_mask=None):
+def crop_image_depthmap(crop_bbox, image, depthmap, camera_intrinsics, normal=None, far_mask=None, trajs_2d=None, valids=None):
     """
     Return a crop of the input view.
     """
     image = ImageList(image)
     l, t, r, b = crop_bbox
+    crop_w, crop_h = r - l, b - t
 
     image = image.crop((l, t, r, b))
     depthmap = depthmap[t:b, l:r]
@@ -187,7 +202,18 @@ def crop_image_depthmap(image, depthmap, camera_intrinsics, crop_bbox, normal=No
     camera_intrinsics[0, 2] -= l
     camera_intrinsics[1, 2] -= t
 
-    return image.to_pil(), depthmap, camera_intrinsics, normal, far_mask
+    if trajs_2d is not None:
+        trajs_2d[:, 0] -= l
+        trajs_2d[:, 1] -= t
+
+        if valids is not None:
+            in_bounds = (
+                (trajs_2d[:, 0] >= 0) & (trajs_2d[:, 0] < crop_w) &
+                (trajs_2d[:, 1] >= 0) & (trajs_2d[:, 1] < crop_h)
+            )
+            valids = valids & in_bounds
+
+    return image.to_pil(), depthmap, camera_intrinsics, normal, far_mask, trajs_2d, valids
 
 
 def bbox_from_intrinsics_in_out(input_camera_matrix, output_camera_matrix, output_resolution):

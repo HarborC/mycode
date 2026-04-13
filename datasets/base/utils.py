@@ -2,10 +2,9 @@
 
 import cv2
 import numpy as np
-from scipy.ndimage.measurements import label
+from scipy.ndimage import label
 from .transforms import *
 import math
-from torch.utils.data.dataloader import default_collate
 import random
 
 def tensor2pil(img):
@@ -228,71 +227,101 @@ def fill_in_fast(depth_map, max_depth=100.0, custom_kernel=DIAMOND_KERNEL_5,
     return depth_map
 
 
-def view_name(view, batch_index=None):
-    def sel(x): return x[batch_index] if batch_index not in (None, slice(None)) else x
-    db = sel(view['dataset'])
-    label = sel(view['label'])
-    instance = sel(view['instance'])
+def view_name(clip, batch_index=None):
+    """Get a human-readable name from a UnifiedClip (or its metadata dict)."""
+    if isinstance(clip, dict):
+        db = clip.get('dataset', '?')
+        label = clip.get('label', '?')
+        instance = clip.get('instance', '?')
+    else:
+        db = clip.dataset
+        label = clip.label
+        instance = clip.instances[batch_index] if batch_index is not None and batch_index < len(clip.instances) else '?'
     return f"{db}/{label}/{instance}"
-
-def is_good_type(key, v):
-    """ returns (is_good, err_msg) 
-    """
-    if isinstance(v, (str, int, tuple)):
-        return True, None
-    if v.dtype not in (torch.bool, np.float32, torch.float32, bool, np.int32, np.int64, np.uint8):
-        return False, f"bad {v.dtype=}"
-    return True, None
-
-
-def transpose_to_landscape(view):
-    height, width = view['true_shape']
-
-    if width < height:
-        # rectify portrait to landscape
-        assert view['img'].shape == (3, height, width)
-        view['img'] = view['img'].swapaxes(1, 2)
-
-        assert view['valid_mask'].shape == (height, width)
-        view['valid_mask'] = view['valid_mask'].swapaxes(0, 1)
-
-        assert view['depthmap'].shape == (height, width)
-        view['depthmap'] = view['depthmap'].swapaxes(0, 1)
-
-        if 'normal' in view:
-            assert view['normal'].shape == (height, width, 3)
-            view['normal'] = view['normal'].swapaxes(0, 1)
-
-        if 'far_mask' in view:
-            assert view['far_mask'].shape == (height, width)
-            view['far_mask'] = view['far_mask'].swapaxes(0, 1)
-
-        assert view['pts3d'].shape == (height, width, 3)
-        view['pts3d'] = view['pts3d'].swapaxes(0, 1)
-
-        # transpose x and y pixels
-        view['camera_intrinsics'] = view['camera_intrinsics'][[1, 0, 2]]
 
 def unified_collate_fn(batch):
     if isinstance(batch[0], dict):
         batch = [batch]
-    views_num = len(batch[0])
-    all_keys = batch[0][0].keys()
 
-    batched_data = [{key: [] for key in all_keys} for _ in range(views_num)]
-    for sample in batch:
-        for i in range(views_num):
-            for key in all_keys:
-                batched_data[i][key].append(sample[i].get(key, None))
+    B = len(batch)
+    T = batch[0].images.shape[0]
 
-    for i in range(views_num):
-        for key, data in batched_data[i].items():
+    result = {}
+
+    # images: [T, 3, H, W] float tensor -> [B, T, 3, H, W]
+    result['images'] = torch.stack([clip.images.float() for clip in batch], dim=0)
+
+    # depths: [T, H, W] ndarray -> [B, T, 1, H, W]
+    result['depths'] = torch.stack([torch.from_numpy(clip.depths).unsqueeze(1) for clip in batch], dim=0)
+
+    # pts3d: [T, H, W, 3] ndarray -> [B, T, H, W, 3]
+    if batch[0].pts3d is not None:
+        result['pts3d'] = torch.stack([torch.from_numpy(clip.pts3d) for clip in batch], dim=0)
+    else:
+        result['pts3d'] = [None] * B
+
+    # valid_mask: [T, H, W] ndarray -> [B, T, H, W]
+    if batch[0].valid_mask is not None:
+        result['valid_mask'] = torch.stack([torch.from_numpy(clip.valid_mask) for clip in batch], dim=0)
+    else:
+        result['valid_mask'] = [None] * B
+
+    # normal: [T, H, W, 3] ndarray or None
+    if batch[0].normal is not None:
+        result['normal'] = torch.stack([torch.from_numpy(clip.normal) for clip in batch], dim=0)
+    else:
+        result['normal'] = [None] * B
+
+    # Per-clip array fields
+    result['camera_poses'] = torch.stack([torch.from_numpy(clip.camera_poses) for clip in batch], dim=0)  # [B, T, 4, 4]
+    result['intrinsics'] = torch.stack([torch.from_numpy(clip.intrinsics) for clip in batch], dim=0)  # [B, T, 3, 3]
+
+    # true_shape: [B, T, 2]
+    result['true_shape'] = torch.stack([torch.from_numpy(clip.true_shape) for clip in batch], dim=0)  # [B, T, 2]
+
+    # idx: list of tuples
+    result['idx'] = [clip.idx for clip in batch]
+
+    # z_far: [B]
+    result['z_far'] = torch.tensor([clip.z_far for clip in batch])
+
+    # Metadata strings
+    result['dataset'] = [clip.dataset for clip in batch]
+    result['label'] = [clip.label for clip in batch]
+    result['instances'] = [list(clip.instances) for clip in batch]
+
+    # Optional track fields
+    has_tracks = batch[0].trajs_2d is not None
+    if has_tracks:
+        try:
+            result['trajs_2d'] = torch.stack([torch.from_numpy(clip.trajs_2d) for clip in batch], dim=0)  # [B, T, N, 2]
+        except Exception:
+            result['trajs_2d'] = [clip.trajs_2d for clip in batch]
+
+        if batch[0].trajs_3d_world is not None:
             try:
-                batched_data[i][key] = default_collate(data)
+                result['trajs_3d_world'] = torch.stack([torch.from_numpy(clip.trajs_3d_world) for clip in batch], dim=0)  # [B, T, N, 3]
             except Exception:
-                batched_data[i][key] = data
+                result['trajs_3d_world'] = [clip.trajs_3d_world for clip in batch]
 
-    return batched_data
+        if batch[0].visibility is not None:
+            try:
+                result['visibility'] = torch.stack([torch.from_numpy(clip.visibility) for clip in batch], dim=0)  # [B, T, N]
+            except Exception:
+                result['visibility'] = [clip.visibility for clip in batch]
+
+        if batch[0].valids is not None:
+            try:
+                result['valids'] = torch.stack([torch.from_numpy(clip.valids) for clip in batch], dim=0)  # [B, T, N]
+            except Exception:
+                result['valids'] = [clip.valids for clip in batch]
+    else:
+        result['trajs_2d'] = [None] * B
+        result['trajs_3d_world'] = [None] * B
+        result['visibility'] = [None] * B
+        result['valids'] = [None] * B
+
+    return result
 
 def add_noise(dep, input_noise, generator=None):
     # add noise
@@ -640,5 +669,7 @@ def normalize_poses(poses: torch.Tensor,
         augmented_poses = torch.eye(4, device=device).unsqueeze(0).unsqueeze(0).repeat(B, N, 1, 1)
         augmented_poses[:, :, :3, :3] = augmented_rotations
         augmented_poses[:, :, :3, 3] = augmented_translations
+
+        return augmented_poses, scale
 
     return normalized_poses, scale
