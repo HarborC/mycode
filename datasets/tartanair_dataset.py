@@ -1,11 +1,12 @@
 import sys
 sys.path.insert(0, '.')
 
-from datasets.base.base_dataset import BaseDataset
+from datasets.base.base_dataset import BaseDataset, load_precomputed_fast
 from datasets.base.types import UnifiedClip
 import os
 import numpy as np
 import os.path as osp
+from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
 from datasets.base.transforms import *
@@ -33,6 +34,7 @@ class TarTanAirDataset(BaseDataset):
         verbose=False,
         max_distance=24,
         seq_num=-1,
+        precompute_root=None,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -41,6 +43,7 @@ class TarTanAirDataset(BaseDataset):
         self.dataset_label = 'TarTanAir'
         self.max_distance = max_distance
         self.data_root = data_root
+        self.precompute_root = Path(precompute_root) if precompute_root else None
 
         cache_path = f'data/dataset_cache/tartanair_cache.npy'
         if not os.path.exists(cache_path):
@@ -120,7 +123,37 @@ class TarTanAirDataset(BaseDataset):
 
         clip_label = f'{scene[0]}_{scene[1]}_{scene[2]}'
 
-        for idx in idxs:
+        # ---- Load precomputed tracks if available ----
+        trajs_2d = trajs_3d_world = visibility = None
+        has_tracks = False
+        if self.precompute_root is not None:
+            pc = load_precomputed_fast(
+                str(self.precompute_root / clip_label / "precomputed.npz"),
+                idxs,
+            )
+            if pc is not None and 'trajs_2d' in pc:
+                trajs_2d = pc['trajs_2d'].astype(np.float32)
+                trajs_3d_world = pc.get('trajs_3d_world')
+                if trajs_3d_world is not None:
+                    trajs_3d_world = trajs_3d_world.astype(np.float32)
+                visibility = pc.get('visibs')
+                if visibility is not None:
+                    visibility = visibility.astype(bool)
+                has_tracks = True
+
+        # ── NED → ENU coordinate conversion ──────────────────────────────
+        # TartanAir world frame: NED (x=North, y=East,  z=Down)
+        # Target  world frame:   ENU (x=East,  y=North, z=Up)
+        # For c2w:  c2w_enu = T_ned2enu @ c2w_ned
+        R_ned2enu = np.array([
+            [0,  1,  0],
+            [1,  0,  0],
+            [0,  0, -1],
+        ], dtype=np.float32)
+        T_ned2enu = np.eye(4, dtype=np.float32)
+        T_ned2enu[:3, :3] = R_ned2enu
+
+        for t_i, idx in enumerate(idxs):
             impath = os.path.join(self.data_root, scene[0], scene[1], scene[2], 'image_left', f'{idx:06d}_left.png')
             depthpath = os.path.join(self.data_root, scene[0], scene[1], scene[2], 'depth_left', f'{idx:06d}_left_depth.npy')
 
@@ -129,8 +162,12 @@ class TarTanAirDataset(BaseDataset):
             depthmap = np.load(depthpath)
             depthmap[depthmap > 80] = -1
 
-            rgb_image, depthmap, K, _, _, _, _ = self._crop_resize_if_necessary(
-                rgb_image, depthmap, self.intrinsics.copy(), resolution, rng=rng, info=impath)
+            frame_trajs = trajs_2d[t_i].copy() if has_tracks else None
+            frame_visib = visibility[t_i] if has_tracks and visibility is not None else None
+
+            rgb_image, depthmap, K, _, _, frame_trajs, frame_visib = self._crop_resize_if_necessary(
+                rgb_image, depthmap, self.intrinsics.copy(), resolution, rng=rng, info=impath,
+                trajs_2d=frame_trajs, visibility=frame_visib)
 
             pts3d_i, valid_mask_i, depthmap = self._process_depth(
                 depthmap, K, camera_pose,
@@ -144,11 +181,19 @@ class TarTanAirDataset(BaseDataset):
             pts3d_list.append(pts3d_i)
             valid_mask_list.append(valid_mask_i)
 
+            if has_tracks:
+                trajs_2d[t_i] = frame_trajs
+            if frame_visib is not None:
+                visibility[t_i] = frame_visib
+
         clip = UnifiedClip(
             images=torch.stack(images, dim=0),
             depths=np.stack(depths, axis=0),
             camera_poses=np.stack(poses, axis=0),
             intrinsics=np.stack(intrinsics, axis=0),
+            trajs_2d=trajs_2d,
+            trajs_3d_world=trajs_3d_world,
+            visibility=visibility,
             dataset=self.dataset_label,
             label=clip_label,
             instances=instances,
@@ -164,6 +209,7 @@ if __name__ == '__main__':
 
     dataset = TarTanAirDataset(
         data_root='/data2/d4rt/datasets/TartanAir2',
+        precompute_root='/data2/d4rt/datasets/TartanAir2',
         frame_num=48,
         resolution=[(512, 384)],
         mode='train',
