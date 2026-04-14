@@ -68,32 +68,24 @@ class KubricDataset(BaseDataset):
         # ---- Load camera params ----
         rank = np.load(scene_dir / f"{seq}_with_rank.npz", allow_pickle=True)
         K_shared = np.asarray(rank["shared_intrinsics"], dtype=np.float32)        # [3,3]
-        extrinsics_t34 = np.asarray(rank["extrinsics"], dtype=np.float32)          # [T_total,3,4], w2c
+        extrinsics_t34 = np.asarray(rank["extrinsics"], dtype=np.float32)         # [T_total,3,4], w2c
 
         frame_files = sorted((scene_dir / "frames").glob("*.png"))
+        depth_files = sorted((scene_dir / "depths").glob("*.npy"))
         T_total = len(frame_files)
         frame_idxs = self._sample_frame_indices(T_total, rng)
 
         # ---- Load tracks and visibility ----
-        h5_path = (scene_dir / f"{seq}.npy").with_suffix('.h5')
-        if h5_path.exists():
-            import h5py
-            with h5py.File(h5_path, 'r') as hf:
-                trajs_2d     = hf['trajs_2d'][frame_idxs]        # [T, N, 2]
-                coords_depth = hf['coords_depth'][frame_idxs]    # [T, N]
-                visibility   = hf['visibility'][frame_idxs]      # [T, N]
-        else:
-            ann = np.load(scene_dir / f"{seq}.npy", allow_pickle=True).item()
-            coords_nt2 = np.asarray(ann["coords"], dtype=np.float32)              # [N, T_total, 2]
-            visibility_nt = np.asarray(ann["visibility"], dtype=bool)             # [N, T_total]
+        ann = np.load(scene_dir / f"{seq}.npy", allow_pickle=True).item()
+        coords_nt2 = np.asarray(ann["coords"], dtype=np.float32)                # [N, T_total, 2]
+        visibility_nt = np.asarray(ann["visibility"], dtype=bool)               # [N, T_total]
 
-            trajs_2d = np.transpose(coords_nt2[:, frame_idxs, :], (1, 0, 2))    # [T, N, 2]
-            visibility = np.transpose(visibility_nt[:, frame_idxs], (1, 0))       # [T, N]
+        trajs_2d = np.transpose(coords_nt2[:, frame_idxs, :], (1, 0, 2))        # [T, N, 2]
+        visibility = np.transpose(visibility_nt[:, frame_idxs], (1, 0))         # [T, N]
 
-            # Sample depth at track locations from dense depth maps
-            dense_depth_thw1 = np.asarray(ann["depth"], dtype=np.float32)          # [T_total, H, W, 1]
-            coords_depth = self._sample_depth_at_tracks(
-                coords_nt2, dense_depth_thw1, frame_idxs)                         # [T, N]
+        # Sample depth at track locations from dense depth maps
+        coords_depth = self._sample_depth_at_tracks(
+            coords_nt2, np.asarray(ann["depth"], dtype=np.float32), frame_idxs) # [T, N]
 
         # ---- Compute initial valids before crop/resize ----
         valids = (
@@ -103,18 +95,6 @@ class KubricDataset(BaseDataset):
             & (coords_depth > 0)
         )
 
-        # ---- Load dense depth maps (for image-level depth) ----
-        depth_dir = scene_dir / "depths"
-        depth_files = sorted(depth_dir.glob("*.npy")) if depth_dir.exists() else []
-        use_per_frame_depth = len(depth_files) > 0
-
-        # If h5 exists but no per-frame depth files, load dense depth from .npy annotation
-        if not use_per_frame_depth and h5_path.exists():
-            ann_for_depth = np.load(scene_dir / f"{seq}.npy", allow_pickle=True).item()
-            dense_depth_for_h5 = np.asarray(ann_for_depth["depth"], dtype=np.float32)  # [T, H, W, 1]
-        else:
-            dense_depth_for_h5 = None
-
         images, depths, poses, intrinsics = [], [], [], []
         pts3d_list, valid_mask_list = [], []
         instances = []
@@ -123,18 +103,7 @@ class KubricDataset(BaseDataset):
 
         for t_i, fi in enumerate(frame_idxs):
             rgb_image = np.asarray(Image.open(frame_files[int(fi)]).convert("RGB"))
-
-            if use_per_frame_depth:
-                depthmap = np.load(depth_files[int(fi)]).astype(np.float32).squeeze()
-            elif not h5_path.exists():
-                depthmap = dense_depth_thw1[int(fi), :, :, 0]
-            elif dense_depth_for_h5 is not None:
-                depthmap = dense_depth_for_h5[int(fi), :, :, 0]
-            else:
-                depthmap = np.zeros(rgb_image.shape[:2], dtype=np.float32)
-
-            if depthmap is None:
-                depthmap = np.zeros(rgb_image.shape[:2], dtype=np.float32)
+            depthmap = np.load(depth_files[int(fi)]).astype(np.float32).squeeze()
 
             w2c = np.eye(4, dtype=np.float32)
             w2c[:3, :4] = extrinsics_t34[int(fi)]
