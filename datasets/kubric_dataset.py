@@ -80,12 +80,12 @@ class KubricDataset(BaseDataset):
         coords_nt2 = np.asarray(ann["coords"], dtype=np.float32)                # [N, T_total, 2]
         visibility_nt = np.asarray(ann["visibility"], dtype=bool)               # [N, T_total]
 
-        trajs_2d = np.transpose(coords_nt2[:, frame_idxs, :], (1, 0, 2))        # [T, N, 2]
-        visibility = np.transpose(visibility_nt[:, frame_idxs], (1, 0))         # [T, N]
-
         # Sample depth at track locations from dense depth maps
         coords_depth = self._sample_depth_at_tracks(
             coords_nt2, np.asarray(ann["depth"], dtype=np.float32), frame_idxs) # [T, N]
+
+        trajs_2d = np.transpose(coords_nt2[:, frame_idxs, :], (1, 0, 2))        # [T, N, 2]
+        visibility = np.transpose(visibility_nt[:, frame_idxs], (1, 0))         # [T, N]
 
         images, depths, poses, intrinsics = [], [], [], []
         pts3d_list, valid_mask_list = [], []
