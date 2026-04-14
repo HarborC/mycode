@@ -216,6 +216,7 @@ if __name__ == '__main__':
 
     dataset = BlendedMVSDataset(
         data_root='/data2/d4rt/datasets/BlendedMVS',
+        precompute_root='/data2/d4rt/datasets/BlendedMVS',
         frame_num=48,
         resolution=[(512, 384)],
         mode='train',

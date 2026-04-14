@@ -329,6 +329,10 @@ class BaseDataset(EasyDataset):
             target_resolution = target_resolution + rng.integers(0, self.aug_crop)
             image, depthmap, intrinsics, normal, far_mask, trajs_2d, visibility = cropping.rescale_image_depthmap(
             target_resolution, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, visibility=visibility)
+        elif image.size[0] < target_resolution[0] or image.size[1] < target_resolution[1]:
+            # Image smaller than target after crop — must upscale to avoid negative margins in Step 4
+            image, depthmap, intrinsics, normal, far_mask, trajs_2d, visibility = cropping.rescale_image_depthmap(
+            target_resolution, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, visibility=visibility)
 
         # --- Step 4: final center crop to exact resolution ---
         intrinsics2 = cropping.camera_matrix_of_crop(intrinsics, image.size, resolution, offset_factor=0.5)

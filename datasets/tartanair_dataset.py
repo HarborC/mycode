@@ -163,7 +163,7 @@ if __name__ == '__main__':
     from datasets.utils.viser import visualize_dataset
 
     dataset = TarTanAirDataset(
-        data_root='/home/disk2/jiagangchen/data/dynamic_dataset/droid/tartanair',
+        data_root='/data2/d4rt/datasets/TartanAir2',
         frame_num=48,
         resolution=[(512, 384)],
         mode='train',

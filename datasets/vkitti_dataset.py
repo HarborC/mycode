@@ -175,6 +175,7 @@ if __name__ == '__main__':
 
     dataset = VKittiDataset(
         data_root='/data2/d4rt/datasets/VirtualKitti',
+        precompute_root='/data2/d4rt/datasets/VirtualKitti',
         frame_num=48,
         resolution=[(512, 384)],
         mode='train',

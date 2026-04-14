@@ -85,7 +85,10 @@ class UnifiedClip:
         img = self.images[t]
         if img.ndim == 3 and img.shape[0] == 3:  # [3, H, W] tensor
             # denormalize from [-1, 1] or [0, 1]
-            img = img.transpose(1, 2, 0)
+            if hasattr(img, 'permute'):
+                img = img.permute(1, 2, 0).numpy()
+            else:
+                img = img.transpose(1, 2, 0)
             if img.max() <= 1.5:
                 img = np.clip(img * 255, 0, 255).astype(np.uint8)
             else:
@@ -249,7 +252,7 @@ class UnifiedClip:
 
                 # Tracks: 2D GT vs reprojection, 3D points
                 if has_trajs3d and self.trajs_2d is not None and self.visibility is not None:
-                    valid = valid & self.visibility[t].astype(bool)
+                    valid = self.visibility[t].astype(bool)
                     if valid.any():
                         pts2d_gt = self.trajs_2d[t][valid].astype(np.float32)
                         pts3d_v = self.trajs_3d_world[t][valid].astype(np.float32)

@@ -98,15 +98,7 @@ class PointOdysseyDataset(BaseDataset):
 
         for t_i, fi in enumerate(frame_idxs):
             rgb_image = self._read_rgb(rgb_files[fi])
-
-            if depth_files:
-                depthmap = self._read_depth(depth_files[fi])
-                if depthmap is None:
-                    depthmap = np.zeros(rgb_image.shape[:2], dtype=np.float32)
-                else:
-                    depthmap = depthmap.astype(np.float32) * 0.01
-            else:
-                depthmap = np.zeros(rgb_image.shape[:2], dtype=np.float32)
+            depthmap = self._read_depth(depth_files[fi])
 
             K   = intrinsics_all[fi].astype(np.float32)
             w2c = extrinsics_all[fi].astype(np.float32)
@@ -173,10 +165,9 @@ class PointOdysseyDataset(BaseDataset):
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     def _read_depth(self, path):
-        if Path(path).suffix.lower() == '.npy':
-            return np.load(path).astype(np.float32)
-        depth = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-        return depth.astype(np.float32) if depth is not None else None
+        depth16 = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH)
+        depthmap = depth16.astype(np.float32) / 65535.0 * 1000.0
+        return depthmap
 
 
 if __name__ == '__main__':
