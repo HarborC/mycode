@@ -12,6 +12,51 @@ from omegaconf import OmegaConf
 from .transforms import *
 import pandas as pd
 from .utils import *
+from pathlib import Path
+from typing import Optional
+
+
+def load_precomputed_fast(npz_path, frame_indices):
+    """Load precomputed tracks/normals for specific frame indices.
+
+    Prefers .h5 over .npz for faster random access.
+    Returns dict with arrays indexed to frame_indices, or None.
+    """
+    npz_path = Path(npz_path)
+    h5_path = npz_path.with_suffix('.h5')
+
+    if h5_path.exists():
+        import h5py
+        sorted_idx = sorted(set(frame_indices))
+        idx_map = {v: i for i, v in enumerate(sorted_idx)}
+        reorder = [idx_map[i] for i in frame_indices]
+        needs_reorder = reorder != list(range(len(frame_indices)))
+
+        result = {}
+        with h5py.File(h5_path, 'r') as f:
+            for key in f.keys():
+                ds = f[key]
+                if ds.ndim >= 1 and ds.shape[0] > 1:
+                    data = ds[sorted_idx]
+                    if needs_reorder:
+                        data = data[reorder]
+                    result[key] = data
+                else:
+                    result[key] = ds[()]
+        return result
+
+    elif npz_path.exists():
+        raw = np.load(npz_path, allow_pickle=True)
+        result = {}
+        for k in raw.files:
+            arr = raw[k]
+            if arr.ndim >= 1 and arr.shape[0] > 1:
+                result[k] = arr[np.array(frame_indices)]
+            else:
+                result[k] = arr[()]
+        return result
+
+    return None
 
 
 def sample_frame_indices_stride(

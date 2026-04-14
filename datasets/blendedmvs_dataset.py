@@ -7,7 +7,7 @@ import numpy as np
 from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
-from datasets.base.base_dataset import BaseDataset
+from datasets.base.base_dataset import BaseDataset, load_precomputed_fast
 from datasets.base.types import UnifiedClip
 from datasets.base.transforms import *
 
@@ -69,6 +69,7 @@ class BlendedMVSDataset(BaseDataset):
         data_root=None,
         verbose=False,
         use_masked=False,
+        precompute_root=None,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -79,6 +80,7 @@ class BlendedMVSDataset(BaseDataset):
         self.dataset_label = 'BlendedMVS'
         self.data_root = Path(data_root)
         self.use_masked = use_masked
+        self.precompute_root = Path(precompute_root) if precompute_root else None
 
         # mode -> split list file
         split_key = 'val' if self.mode in ('val', 'valid', 'validation') else 'train'
@@ -136,7 +138,25 @@ class BlendedMVSDataset(BaseDataset):
 
         clip_label = scene_id
 
-        for idx in frame_idxs:
+        # ---- Load precomputed tracks if available ----
+        trajs_2d = trajs_3d_world = visibility = None
+        has_tracks = False
+        if self.precompute_root is not None:
+            pc = load_precomputed_fast(
+                self.precompute_root / scene_id / "precomputed.npz",
+                frame_idxs.tolist(),
+            )
+            if pc is not None and 'trajs_2d' in pc:
+                trajs_2d = pc['trajs_2d'].astype(np.float32)
+                trajs_3d_world = pc.get('trajs_3d_world')
+                if trajs_3d_world is not None:
+                    trajs_3d_world = trajs_3d_world.astype(np.float32)
+                visibility = pc.get('visibs')
+                if visibility is not None:
+                    visibility = visibility.astype(bool)
+                has_tracks = True
+
+        for t_i, idx in enumerate(frame_idxs):
             fid = fids[idx]
             img_suffix = f"{fid}_masked.jpg" if self.use_masked else f"{fid}.jpg"
             img_path   = scene_dir / "blended_images" / img_suffix
@@ -149,8 +169,12 @@ class BlendedMVSDataset(BaseDataset):
             w2c, K = _parse_cam_file(cam_path)
             camera_pose = np.linalg.inv(w2c)   # c2w [4,4]
 
-            rgb_image, depthmap, K, _, _, _, _ = self._crop_resize_if_necessary(
-                rgb_image, depthmap, K, resolution, rng=rng, info=str(img_path))
+            frame_trajs = trajs_2d[t_i].copy() if has_tracks else None
+            frame_visib = visibility[t_i] if has_tracks and visibility is not None else None
+
+            rgb_image, depthmap, K, _, _, frame_trajs, frame_visib = self._crop_resize_if_necessary(
+                rgb_image, depthmap, K, resolution, rng=rng, info=str(img_path),
+                trajs_2d=frame_trajs, visibility=frame_visib)
 
             pts3d_i, valid_mask_i, depthmap = self._process_depth(
                 depthmap, K, camera_pose,
@@ -164,11 +188,19 @@ class BlendedMVSDataset(BaseDataset):
             pts3d_list.append(pts3d_i)
             valid_mask_list.append(valid_mask_i)
 
+            if has_tracks:
+                trajs_2d[t_i] = frame_trajs
+            if frame_visib is not None:
+                visibility[t_i] = frame_visib
+
         clip = UnifiedClip(
             images=torch.stack(images, dim=0),
             depths=np.stack(depths, axis=0),
             camera_poses=np.stack(poses, axis=0),
             intrinsics=np.stack(intrinsics, axis=0),
+            trajs_2d=trajs_2d,
+            trajs_3d_world=trajs_3d_world,
+            visibility=visibility,
             dataset=self.dataset_label,
             label=clip_label,
             instances=instances,
