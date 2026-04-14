@@ -310,16 +310,10 @@ def unified_collate_fn(batch):
             except Exception:
                 result['visibility'] = [clip.visibility for clip in batch]
 
-        if batch[0].valids is not None:
-            try:
-                result['valids'] = torch.stack([torch.from_numpy(clip.valids) for clip in batch], dim=0)  # [B, T, N]
-            except Exception:
-                result['valids'] = [clip.valids for clip in batch]
     else:
         result['trajs_2d'] = [None] * B
         result['trajs_3d_world'] = [None] * B
         result['visibility'] = [None] * B
-        result['valids'] = [None] * B
 
     return result
 

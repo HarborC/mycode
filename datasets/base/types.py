@@ -32,8 +32,6 @@ class UnifiedClip:
         ``[T, N, 3]`` float32 3-D world-space track positions.
     visibility : ndarray | None
         ``[T, N]`` bool  track visibility mask.
-    valids : ndarray | None
-        ``[T, N]`` bool  track validity mask (finite coords + positive depth).
 
     pts3d : ndarray | None
         ``[T, H, W, 3]`` float32 3-D point maps.
@@ -64,7 +62,6 @@ class UnifiedClip:
     trajs_2d: Optional[np.ndarray] = None
     trajs_3d_world: Optional[np.ndarray] = None
     visibility: Optional[np.ndarray] = None
-    valids: Optional[np.ndarray] = None
 
     pts3d: Optional[np.ndarray] = None      # [T, H, W, 3] float32
     valid_mask: Optional[np.ndarray] = None  # [T, H, W] bool
@@ -251,11 +248,8 @@ class UnifiedClip:
                     rec.log("vis/normals", rr.Image(normal_vis))
 
                 # Tracks: 2D GT vs reprojection, 3D points
-                if has_trajs3d and self.trajs_2d is not None and self.valids is not None:
-                    valid = self.valids[t].astype(bool)
-                    # Also consider visibility if available
-                    if self.visibility is not None:
-                        valid = valid & self.visibility[t].astype(bool)
+                if has_trajs3d and self.trajs_2d is not None and self.visibility is not None:
+                    valid = valid & self.visibility[t].astype(bool)
                     if valid.any():
                         pts2d_gt = self.trajs_2d[t][valid].astype(np.float32)
                         pts3d_v = self.trajs_3d_world[t][valid].astype(np.float32)

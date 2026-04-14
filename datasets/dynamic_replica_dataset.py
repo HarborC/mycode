@@ -61,6 +61,23 @@ def _load_depth(path):
     return depth
 
 
+def _load_trajectory_pth(path):
+    """Load a per-frame trajectory .pth file.
+
+    Returns dict with:
+        traj_3d_world : (N, 3) float32
+        traj_2d       : (N, 2) float32  (first 2 cols of the stored N,3 array)
+        visibs        : (N,)   bool
+    """
+    import torch
+    data = torch.load(path, map_location="cpu", weights_only=False)
+    return {
+        "traj_3d_world": data["traj_3d_world"].numpy().astype(np.float32),
+        "traj_2d": data["traj_2d"].numpy()[:, :2].astype(np.float32),
+        "visibs": data["verts_inds_vis"].numpy().astype(bool),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Dataset
 # ---------------------------------------------------------------------------
@@ -164,7 +181,35 @@ class DynamicReplicaDataset(BaseDataset):
 
         clip_label = seq
 
+        # ---- Collect trajectory paths ----
+        traj_paths = []
         for idx in frame_idxs:
+            fn = fns[idx]
+            anno = self._anno_index[(base_name, camera, fn)]
+            traj_rel = anno.get("trajectories", {}).get("path")
+            traj_paths.append(self.split_root / traj_rel if traj_rel else None)
+
+        has_tracks = all(p is not None for p in traj_paths)
+
+        # ---- Load trajectories if available ----
+        trajs_2d = None
+        trajs_3d_world = None
+        visibility = None
+
+        if has_tracks:
+            traj_3d_list, traj_2d_list, vis_list = [], [], []
+            for p in traj_paths:
+                traj_data = _load_trajectory_pth(p)
+                traj_3d_list.append(traj_data["traj_3d_world"])   # (N, 3)
+                traj_2d_list.append(traj_data["traj_2d"])         # (N, 2)
+                vis_list.append(traj_data["visibs"])               # (N,)
+
+            trajs_3d_world = np.stack(traj_3d_list, axis=0)  # [T, N, 3]
+            trajs_2d = np.stack(traj_2d_list, axis=0)        # [T, N, 2]
+            visibility = np.stack(vis_list, axis=0)           # [T, N]
+
+        # ---- Per-frame processing ----
+        for t_i, idx in enumerate(frame_idxs):
             fn = fns[idx]
             anno = self._anno_index[(base_name, camera, fn)]
 
@@ -185,8 +230,12 @@ class DynamicReplicaDataset(BaseDataset):
             )
             camera_pose = np.linalg.inv(w2c)   # c2w [4,4]
 
-            rgb_image, depthmap, K, _, _, _, _ = self._crop_resize_if_necessary(
-                rgb_image, depthmap, K, resolution, rng=rng, info=str(img_path))
+            frame_trajs = trajs_2d[t_i].copy() if has_tracks else None
+            frame_visibility = visibility[t_i].copy() if has_tracks else None
+
+            rgb_image, depthmap, K, _, _, frame_trajs, frame_valids = self._crop_resize_if_necessary(
+                rgb_image, depthmap, K, resolution, rng=rng, info=str(img_path),
+                trajs_2d=frame_trajs, visibility=frame_visibility)
 
             pts3d_i, valid_mask_i, depthmap = self._process_depth(
                 depthmap, K, camera_pose,
@@ -200,15 +249,26 @@ class DynamicReplicaDataset(BaseDataset):
             pts3d_list.append(pts3d_i)
             valid_mask_list.append(valid_mask_i)
 
+            if has_tracks:
+                trajs_2d[t_i] = frame_trajs
+                visibility[t_i] = frame_visibility
+
         clip = UnifiedClip(
             images=torch.stack(images, dim=0),
             depths=np.stack(depths, axis=0),
             camera_poses=np.stack(poses, axis=0),
             intrinsics=np.stack(intrinsics, axis=0),
+            trajs_2d=trajs_2d,
+            trajs_3d_world=trajs_3d_world,
+            visibility=visibility,
             dataset=self.dataset_label,
             label=clip_label,
             instances=instances,
-            metadata={},
+            metadata={
+                'has_tracks': has_tracks,
+                'has_visibility': has_tracks,
+                'has_trajs_3d_world': has_tracks,
+            },
         )
         clip.pts3d = np.stack(pts3d_list, axis=0)
         clip.valid_mask = np.stack(valid_mask_list, axis=0)

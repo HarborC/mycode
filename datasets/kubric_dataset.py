@@ -87,14 +87,6 @@ class KubricDataset(BaseDataset):
         coords_depth = self._sample_depth_at_tracks(
             coords_nt2, np.asarray(ann["depth"], dtype=np.float32), frame_idxs) # [T, N]
 
-        # ---- Compute initial valids before crop/resize ----
-        valids = (
-            np.isfinite(trajs_2d[..., 0])
-            & np.isfinite(trajs_2d[..., 1])
-            & np.isfinite(coords_depth)
-            & (coords_depth > 0)
-        )
-
         images, depths, poses, intrinsics = [], [], [], []
         pts3d_list, valid_mask_list = [], []
         instances = []
@@ -110,12 +102,12 @@ class KubricDataset(BaseDataset):
             camera_pose = np.linalg.inv(w2c)
 
             frame_trajs = trajs_2d[t_i].copy().astype(np.float32)
-            frame_valids = valids[t_i].copy()
+            frame_visibility = visibility[t_i].copy()
 
             rgb_image, depthmap, K, _, _, frame_trajs, frame_valids = self._crop_resize_if_necessary(
                 rgb_image, depthmap, K_shared.copy(), resolution,
                 rng=rng, info=str(frame_files[int(fi)]),
-                trajs_2d=frame_trajs, valids=frame_valids)
+                trajs_2d=frame_trajs, visibility=frame_visibility)
 
             pts3d_i, valid_mask_i, depthmap = self._process_depth(
                 depthmap, K, camera_pose,
@@ -130,7 +122,7 @@ class KubricDataset(BaseDataset):
             valid_mask_list.append(valid_mask_i)
 
             trajs_2d[t_i] = frame_trajs
-            valids[t_i] = frame_valids
+            visibility[t_i] = frame_valids
 
         camera_poses = np.stack(poses, axis=0)
         intrinsics_arr = np.stack(intrinsics, axis=0)
@@ -156,7 +148,6 @@ class KubricDataset(BaseDataset):
             trajs_2d=trajs_2d,
             trajs_3d_world=trajs_3d_world,
             visibility=visibility,
-            valids=valids,
             dataset=self.dataset_label,
             label=clip_label,
             instances=instances,

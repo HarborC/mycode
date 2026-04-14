@@ -229,8 +229,8 @@ class BaseDataset(EasyDataset):
             f"{self.__class__.__name__} must implement _get_clip()"
         )
 
-    def _crop_resize_if_necessary(self, image, depthmap, intrinsics, resolution, rng=None, info='', normal=None, far_mask=None, trajs_2d=None, valids=None):
-        """Crop/resize a single frame, synchronously transforming tracks and valids.
+    def _crop_resize_if_necessary(self, image, depthmap, intrinsics, resolution, rng=None, info='', normal=None, far_mask=None, trajs_2d=None, visibility=None):
+        """Crop/resize a single frame, synchronously transforming tracks and visibility.
 
         Steps:
             1. Principal-point centered crop (symmetric around optical center)
@@ -238,7 +238,7 @@ class BaseDataset(EasyDataset):
             3. Lanczos rescale to target resolution
             4. Final center crop to exact resolution
 
-        Track/valids transforms are handled by cropping functions.
+        Track/visibility transforms are handled by cropping functions.
 
         Args:
             image: PIL Image or numpy array [H, W, 3]
@@ -248,10 +248,10 @@ class BaseDataset(EasyDataset):
             rng: numpy RNG for augmentation
             info: string for error messages
             trajs_2d: numpy array [N, 2] or None
-            valids: numpy array [N] bool or None
+            visibility: numpy array [N] bool or None
 
         Returns:
-            (image, depthmap, intrinsics, trajs_2d, valids)
+            (image, depthmap, intrinsics, trajs_2d, visibility)
         """
         if not isinstance(image, PIL.Image.Image):
             image = PIL.Image.fromarray(image)
@@ -268,30 +268,30 @@ class BaseDataset(EasyDataset):
         l, t = cx - min_margin_x, cy - min_margin_y
         r, b = cx + min_margin_x, cy + min_margin_y
         crop_bbox = (l, t, r, b)
-        image, depthmap, intrinsics, normal, far_mask, trajs_2d, valids = cropping.crop_image_depthmap(
-            crop_bbox, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, valids=valids)
+        image, depthmap, intrinsics, normal, far_mask, trajs_2d, visibility = cropping.crop_image_depthmap(
+            crop_bbox, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, visibility=visibility)
 
         W, H = image.size  # size after principal-point crop
 
         # --- Step 2: optional focal augmentation (center crop) ---
         if self.aug_focal:
             crop_scale = self.aug_focal + (1.0 - self.aug_focal) * rng.beta(0.5, 0.5) if rng is not None else self.aug_focal
-            image, depthmap, intrinsics, normal, far_mask, trajs_2d, valids = cropping.center_crop_image_depthmap(
-                crop_scale, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, valids=valids)
+            image, depthmap, intrinsics, normal, far_mask, trajs_2d, visibility = cropping.center_crop_image_depthmap(
+                crop_scale, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, visibility=visibility)
 
         # --- Step 3: Lanczos rescale ---
         if self.aug_crop > 1:
             target_resolution = target_resolution + rng.integers(0, self.aug_crop)
-            image, depthmap, intrinsics, normal, far_mask, trajs_2d, valids = cropping.rescale_image_depthmap(
-            target_resolution, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, valids=valids)
+            image, depthmap, intrinsics, normal, far_mask, trajs_2d, visibility = cropping.rescale_image_depthmap(
+            target_resolution, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, visibility=visibility)
 
         # --- Step 4: final center crop to exact resolution ---
         intrinsics2 = cropping.camera_matrix_of_crop(intrinsics, image.size, resolution, offset_factor=0.5)
         crop_bbox = cropping.bbox_from_intrinsics_in_out(intrinsics, intrinsics2, resolution)
-        image, depthmap, intrinsics2, normal, far_mask, trajs_2d, valids = cropping.crop_image_depthmap(
-            crop_bbox, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, valids=valids)
+        image, depthmap, intrinsics2, normal, far_mask, trajs_2d, visibility = cropping.crop_image_depthmap(
+            crop_bbox, image, depthmap, intrinsics, normal=normal, far_mask=far_mask, trajs_2d=trajs_2d, visibility=visibility)
 
-        return image, depthmap, intrinsics2, normal, far_mask, trajs_2d, valids
+        return image, depthmap, intrinsics2, normal, far_mask, trajs_2d, visibility
 
     def _process_depth(self, depthmap, intrinsics, camera_pose, label='', frame_id=''):
         """Compute pts3d and valid_mask for a single frame.
