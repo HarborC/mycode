@@ -76,6 +76,17 @@ class PointOdysseyDataset(BaseDataset):
         intrinsics_all = anno['intrinsics']   # [T_total,3,3]
         extrinsics_all = anno['extrinsics']   # [T_total,4,4], w2c
 
+        # ---- Load tracks from annotation ----
+        trajs_2d_all = anno.get('trajs_2d')      # [T_total, N, 2]
+        trajs_3d_all = anno.get('trajs_3d')      # [T_total, N, 3]
+        # valids_all   = anno.get('valids')         # [T_total, N]
+        visibs_all   = anno.get('visibs')         # [T_total, N]
+
+        trajs_2d = trajs_2d_all[frame_idxs].astype(np.float32)
+        trajs_3d_world = trajs_3d_all[frame_idxs].astype(np.float32)
+        # valids = valids_all[frame_idxs].astype(bool)
+        visibility = visibs_all[frame_idxs].astype(bool)
+
         rgb_files   = self._sorted_frame_files(scene_dir / "rgbs")
         depth_files = self._sorted_frame_files(scene_dir / "depths")
 
@@ -85,7 +96,7 @@ class PointOdysseyDataset(BaseDataset):
 
         clip_label = seq
 
-        for fi in frame_idxs:
+        for t_i, fi in enumerate(frame_idxs):
             rgb_image = self._read_rgb(rgb_files[fi])
 
             if depth_files:
@@ -101,8 +112,12 @@ class PointOdysseyDataset(BaseDataset):
             w2c = extrinsics_all[fi].astype(np.float32)
             camera_pose = np.linalg.inv(w2c)   # c2w [4,4]
 
-            rgb_image, depthmap, K, _, _, _, _ = self._crop_resize_if_necessary(
-                rgb_image, depthmap, K, resolution, rng=rng, info=str(rgb_files[fi]))
+            frame_trajs = trajs_2d[t_i].copy()
+            frame_visibility = visibility[t_i].copy()
+
+            rgb_image, depthmap, K, _, _, frame_trajs, frame_visibility = self._crop_resize_if_necessary(
+                rgb_image, depthmap, K, resolution, rng=rng, info=str(rgb_files[fi]),
+                trajs_2d=frame_trajs, visibility=frame_visibility)
 
             pts3d_i, valid_mask_i, depthmap = self._process_depth(
                 depthmap, K, camera_pose,
@@ -116,11 +131,17 @@ class PointOdysseyDataset(BaseDataset):
             pts3d_list.append(pts3d_i)
             valid_mask_list.append(valid_mask_i)
 
+            trajs_2d[t_i] = frame_trajs
+            visibility[t_i] = frame_visibility
+
         clip = UnifiedClip(
             images=torch.stack(images, dim=0),
             depths=np.stack(depths, axis=0),
             camera_poses=np.stack(poses, axis=0),
             intrinsics=np.stack(intrinsics, axis=0),
+            trajs_2d=trajs_2d,
+            trajs_3d_world=trajs_3d_world,
+            visibility=visibility,
             dataset=self.dataset_label,
             label=clip_label,
             instances=instances,
@@ -135,9 +156,9 @@ class PointOdysseyDataset(BaseDataset):
         if h5_path.exists():
             import h5py
             with h5py.File(h5_path, 'r') as f:
-                return {k: f[k][()] for k in ('intrinsics', 'extrinsics')}
+                return {k: f[k][()] for k in f.keys()}
         z = np.load(scene_dir / "anno.npz", allow_pickle=True)
-        return {k: z[k] for k in ('intrinsics', 'extrinsics')}
+        return {k: z[k] for k in z.files}
 
     def _sorted_frame_files(self, d):
         files = [p for p in d.iterdir()
