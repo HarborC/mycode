@@ -18,43 +18,15 @@ from PIL import Image
 
 sys.path.insert(0, '/data1/zbf/my_dfrt')
 
-DATASET_ROOTS = {
-    "pointodyssey": Path("/data2/d4rt/datasets/PointOdyssey"),
-    "kubric": Path("/data2/d4rt/datasets/kubric"),
-    "dynamic_replica": Path("/data1/d4rt/datasets/Dynamic_Replica"),
-    "scannet": Path("/data2/d4rt/datasets/scannet/scannet"),
-    "co3dv2": Path("/data2/d4rt/datasets/Co3Dv2"),
-    "blendedmvs": Path("/data2/d4rt/datasets/BlendedMVS"),
-    "mvssynth": Path("/data2/d4rt/datasets/MVS-Synth/GTAV_1080"),
-    "tartanair": Path("/data2/d4rt/datasets/TartanAir"),
-    "vkitti2": Path("/data2/d4rt/datasets/VirtualKitti"),
-    "waymo": Path("/data2/d4rt/datasets/Waymo"),
-}
-
-DATASET_ORDER = [
-    "pointodyssey",
-    "kubric",
-    "dynamic_replica",
-    "scannet",
-    "co3dv2",
-    "blendedmvs",
-    "mvssynth",
-    "tartanair",
-    "vkitti2",
-    "waymo",
+DATASETS = [
+    ("pointodyssey", "/data2/d4rt/datasets/PointOdyssey"),
+    ("kubric",        "/data2/d4rt/datasets/kubric"),
+    ("dynamic_replica", "/data1/d4rt/datasets/Dynamic_Replica"),
+    ("co3dv2",        "/data2/d4rt/datasets/Co3Dv2"),
+    ("blendedmvs",    "/data2/d4rt/datasets/BlendedMVS"),
+    ("mvssynth",      "/data2/d4rt/datasets/MVS-Synth/GTAV_1080"),
+    ("vkitti2",       "/data2/d4rt/datasets/VirtualKitti"),
 ]
-
-
-def get_datasets():
-    return [(name, str(DATASET_ROOTS[name])) for name in DATASET_ORDER]
-
-
-def get_adapter_kwargs(name: str):
-    kwargs = {"split": "train"}
-    if name == "waymo":
-        # RRD verification does not need expensive RAFT flow extraction.
-        kwargs.update({"extract_flow": False, "verbose": False})
-    return kwargs
 
 
 def project_world_to_image(pts_world, K, E):
@@ -84,10 +56,10 @@ def draw_tracks_frame(img_rgb, pts_gt, pts_reproj, valid_mask, t):
         if not valid_mask[i]:
             continue
         gx, gy = int(np.clip(pts_gt[i, 0], 0, W-1)), int(np.clip(pts_gt[i, 1], 0, H-1))
-        cv2.circle(frame, (gx, gy), 3, (0, 220, 0), -1)
+        cv2.circle(frame, (gx, gy), 6, (0, 220, 0), -1)
         if np.isfinite(pts_reproj[i]).all():
             rx, ry = int(np.clip(pts_reproj[i, 0], 0, W-1)), int(np.clip(pts_reproj[i, 1], 0, H-1))
-            cv2.circle(frame, (rx, ry), 2, (220, 0, 0), -1)
+            cv2.circle(frame, (rx, ry), 5, (220, 0, 0), -1)
             cv2.line(frame, (gx, gy), (rx, ry), (255, 200, 0), 1)
     cv2.putText(frame, f"t={t} green=GT red=reproj", (4, 18),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
@@ -384,6 +356,28 @@ def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
                 rec.log("world/camera/image/depth", rr.DepthImage(
                     clip.depths[t], meter=1.0, colormap="Turbo", point_fill_ratio=1.0,
                 ))
+                # Explicitly backproject full depth map -> dense 3D point cloud
+                depth = clip.depths[t]
+                fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
+                ys_all, xs_all = np.where(depth > 1e-3)
+                z_all = depth[ys_all, xs_all].astype(np.float32)
+                fin = np.isfinite(z_all)
+                xs_v, ys_v, z_v = xs_all[fin], ys_all[fin], z_all[fin]
+                if len(z_v) > 0:
+                    x_c = (xs_v - cx) / fx * z_v
+                    y_c = (ys_v - cy) / fy * z_v
+                    pts_cam = np.stack([x_c, y_c, z_v], axis=1).astype(np.float64)
+                    E_inv = np.linalg.inv(E.astype(np.float64))
+                    pts_h = np.concatenate([pts_cam, np.ones((len(pts_cam), 1))], axis=1)
+                    pts3d_dense = (E_inv @ pts_h.T).T[:, :3].astype(np.float32)
+                    # Subsample to ~100k points for performance
+                    step = max(1, len(pts3d_dense) // 100000)
+                    pts3d_dense = pts3d_dense[::step]
+                    img = clip.images[t]
+                    rgb = img[ys_v[::step], xs_v[::step]]
+                    if rgb.max() <= 1.0:
+                        rgb = (rgb * 255).astype(np.uint8)
+                    rec.log("world/pts3d_dense", rr.Points3D(pts3d_dense, colors=rgb, radii=0.3))
 
             if has_normals and clip.normals[t] is not None:
                 normal_vis = ((clip.normals[t] * 0.5 + 0.5).clip(0, 1) * 255).astype(np.uint8)
@@ -399,12 +393,12 @@ def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
                     pts3d_v = clip.trajs_3d_world[t][valid].astype(np.float32)
                     uv_reproj, reproj_valid = project_world_to_image(pts3d_v, K.astype(np.float32), E.astype(np.float32))
                     rec.log("world/camera/image/gt_pts",
-                            rr.Points2D(pts2d_gt[reproj_valid], colors=[0, 255, 0], radii=3))
+                            rr.Points2D(pts2d_gt[reproj_valid], colors=[0, 255, 0], radii=6))
                     rec.log("world/camera/image/reproj_pts",
-                            rr.Points2D(uv_reproj[reproj_valid], colors=[255, 0, 0], radii=2))
-                    rec.log("world/pts3d", rr.Points3D(pts3d_v, colors=[0, 180, 255], radii=0.02))
+                            rr.Points2D(uv_reproj[reproj_valid], colors=[255, 0, 0], radii=5))
 
                     # Backproject depth at pts2d_gt positions -> orange points for comparison
+                    # Use dv mask first, then log pts3d with same mask so both point sets align
                     if has_depth and clip.depths[t] is not None:
                         depth = clip.depths[t]
                         fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
@@ -419,7 +413,13 @@ def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
                             E_inv = np.linalg.inv(E.astype(np.float64))
                             pts_h = np.concatenate([pts_cam, np.ones((len(pts_cam),1), dtype=np.float32)], axis=1)
                             pts3d_from_depth = (E_inv @ pts_h.T).T[:, :3].astype(np.float32)
-                            rec.log("world/pts3d_from_depth", rr.Points3D(pts3d_from_depth, colors=[255, 140, 0], radii=0.02))
+                            # Log both with the same dv-filtered subset so they are point-to-point comparable
+                            rec.log("world/pts3d", rr.Points3D(pts3d_v[dv], colors=[0, 180, 255], radii=0.5))
+                            rec.log("world/pts3d_from_depth", rr.Points3D(pts3d_from_depth, colors=[255, 140, 0], radii=0.5))
+                        else:
+                            rec.log("world/pts3d", rr.Points3D(pts3d_v, colors=[0, 180, 255], radii=0.5))
+                    else:
+                        rec.log("world/pts3d", rr.Points3D(pts3d_v, colors=[0, 180, 255], radii=0.5))
 
         # # ── 3D trajectories ───────────────────────────────────────────────
         # if has_trajs3d:
@@ -439,18 +439,7 @@ def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
     print(f"  -> rerun saved: {rrd_path}")
 
 
-def format_metric(value, precision=3, unit=""):
-    if value is None:
-        return "N/A"
-    try:
-        if np.isnan(value):
-            return "N/A"
-    except TypeError:
-        pass
-    return f"{float(value):.{precision}f}{unit}"
-
-
-def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=False):
+def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=False, num_clips=1):
     from datasets.registry import create_adapter
     from datasets.sampling import DatasetSampler
     import random
@@ -461,15 +450,8 @@ def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=Fals
     print(f"\n{'='*60}")
     print(f"[{name}] root={root}")
 
-    root_path = Path(root)
-    if not root_path.exists():
-        result = {"error": f"dataset root not found: {root}"}
-        print(f"  ERROR: {result['error']}")
-        (out_dir / "result.json").write_text(json.dumps(result, indent=2))
-        return result
-
     try:
-        adapter = create_adapter(name=name, root=root, **get_adapter_kwargs(name))
+        adapter = create_adapter(name=name, root=root, split='train')
     except Exception as e:
         result = {"error": f"adapter init failed: {e}"}
         print(f"  ERROR: {e}")
@@ -485,75 +467,81 @@ def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=Fals
         return result
 
     print(f"  sequences: {len(sampler.valid_sequences)}")
-    rng = random.Random(seed)
-    seq, frame_indices = sampler.sample(rng)
 
-    # For datasets with precomputed tracks, resample around ref_frame where valids are non-zero
-    if name in ("co3dv2", "vkitti2"):
-        import numpy as _np
-        npz = adapter.precompute_root / seq / "precomputed.npz"
-        h5 = npz.with_suffix(".h5")
-        cache_path = h5 if h5.exists() else (npz if npz.exists() else None)
-        if cache_path is not None:
-            if str(cache_path).endswith(".h5"):
-                import h5py as _h5
-                with _h5.File(cache_path, "r") as _f:
-                    ref = int(_f["ref_frame"][()])
-            else:
-                ref = int(_np.load(cache_path, allow_pickle=True)["ref_frame"])
-            half = clip_len // 2
-            frame_indices = list(range(max(0, ref - half), ref + half))[:clip_len]
+    clips_results = []
+    for clip_i in range(num_clips):
+        clip_seed = seed + clip_i
+        rng = random.Random(clip_seed)
+        seq, frame_indices = sampler.sample(rng)
 
-    print(f"  testing sequence: {seq}  frames={frame_indices[:3]}...({len(frame_indices)} total)")
+        # For datasets with precomputed tracks, resample around ref_frame where valids are non-zero
+        if name in ("co3dv2", "vkitti2"):
+            import numpy as _np
+            npz = adapter.precompute_root / seq / "precomputed.npz"
+            h5 = npz.with_suffix(".h5")
+            cache_path = h5 if h5.exists() else (npz if npz.exists() else None)
+            if cache_path is not None:
+                if str(cache_path).endswith(".h5"):
+                    import h5py as _h5
+                    with _h5.File(cache_path, "r") as _f:
+                        ref = int(_f["ref_frame"][()])
+                else:
+                    ref = int(_np.load(cache_path, allow_pickle=True)["ref_frame"])
+                half = clip_len // 2
+                frame_indices = list(range(max(0, ref - half), ref + half))[:clip_len]
 
-    try:
-        clip = adapter.load_clip(seq, frame_indices)
-    except Exception as e:
-        result = {"error": f"load_clip failed: {e}", "traceback": traceback.format_exc()}
-        print(f"  ERROR loading clip: {e}")
-        (out_dir / "result.json").write_text(json.dumps(result, indent=2))
-        return result
+        print(f"  [clip {clip_i}] seq={seq}  frames={frame_indices[:3]}...({len(frame_indices)} total)")
 
-    has_tracks = clip.metadata.get("has_tracks", False) and clip.trajs_3d_world is not None
-
-    print(f"  has_tracks={has_tracks}, frames={len(clip.images)}, size={clip.image_size}")
-    print(f"  has_depth={clip.depths is not None}, has_normals={clip.normals is not None}")
-
-    metrics = {}
-    try:
-        if has_tracks:
-            metrics = verify_has_tracks(clip, out_dir)
-            me = metrics.get('mean_reproj_error_px')
-            mx = metrics.get('max_reproj_error_px')
-            print(f"  reproj_error: mean={me:.3f}px  max={mx:.3f}px" if me is not None
-                  else f"  reproj_error: N/A (no valid points)")
-            d3d = metrics.get('mean_depth3d_error_m')
-            if d3d is not None:
-                print(f"  depth3d_error: mean={d3d:.4f}m  max={metrics.get('max_depth3d_error_m'):.4f}m")
-        else:
-            metrics = verify_no_tracks(clip, out_dir)
-            me = metrics.get('mean_roundtrip_error_px')
-            mx = metrics.get('max_roundtrip_error_px')
-            print(f"  roundtrip_error: mean={me:.4f}px  max={mx:.4f}px" if me is not None
-                  else f"  roundtrip_error: N/A")
-    except Exception as e:
-        metrics = {"error": f"verify failed: {e}", "traceback": traceback.format_exc()}
-        print(f"  ERROR in verify: {e}")
-
-    if use_rerun:
         try:
-            log_clip_to_rerun(clip, name, seq, out_dir / "clip.rrd")
+            clip = adapter.load_clip(seq, frame_indices)
         except Exception as e:
-            print(f"  rerun ERROR: {e}")
+            print(f"  ERROR loading clip {clip_i}: {e}")
+            clips_results.append({"error": f"load_clip failed: {e}"})
+            continue
+
+        has_tracks = clip.metadata.get("has_tracks", False) and clip.trajs_3d_world is not None
+        print(f"  has_tracks={has_tracks}, frames={len(clip.images)}, size={clip.image_size}")
+
+        metrics = {}
+        try:
+            if has_tracks:
+                metrics = verify_has_tracks(clip, out_dir)
+                me = metrics.get('mean_reproj_error_px')
+                mx = metrics.get('max_reproj_error_px')
+                print(f"  reproj_error: mean={me:.3f}px  max={mx:.3f}px" if me is not None
+                      else f"  reproj_error: N/A (no valid points)")
+            else:
+                metrics = verify_no_tracks(clip, out_dir)
+                me = metrics.get('mean_roundtrip_error_px')
+                mx = metrics.get('max_roundtrip_error_px')
+                print(f"  roundtrip_error: mean={me:.4f}px  max={mx:.4f}px" if me is not None
+                      else f"  roundtrip_error: N/A")
+        except Exception as e:
+            metrics = {"error": f"verify failed: {e}", "traceback": traceback.format_exc()}
+            print(f"  ERROR in verify: {e}")
+
+        if use_rerun:
+            rrd_name = f"clip_{clip_i}.rrd" if num_clips > 1 else "clip.rrd"
+            try:
+                log_clip_to_rerun(clip, name, seq, out_dir / rrd_name)
+            except Exception as e:
+                print(f"  rerun ERROR: {e}")
+
+        clips_results.append({
+            "clip_index": clip_i,
+            "sequence": seq,
+            "frame_indices": frame_indices,
+            "has_tracks": has_tracks,
+            "num_frames": len(clip.images),
+            "image_size": list(clip.image_size),
+            "metrics": metrics,
+        })
 
     result = {
         "dataset": name,
-        "sequence": seq,
-        "frame_indices": frame_indices,
-        "has_tracks": has_tracks,
-        "num_frames": len(clip.images),
-        "image_size": list(clip.image_size),
-        "metrics": metrics,
+        "clips": clips_results,
+        # keep top-level fields from first clip for backward compat
+        **(clips_results[0] if clips_results else {}),
     }
     (out_dir / "result.json").write_text(json.dumps(result, indent=2, default=str))
     print(f"  -> saved to {out_dir}/")
@@ -567,17 +555,18 @@ def main():
     parser.add_argument("--out", default="vis_gt/verify")
     parser.add_argument("--clip-len", type=int, default=48)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--num-clips", type=int, default=1, help="number of clips to render per dataset")
     parser.add_argument("--no-rerun", action="store_true", help="disable saving .rrd for rerun viewer")
     args = parser.parse_args()
 
     use_rerun = not args.no_rerun
 
     if args.all:
-        datasets = get_datasets()
+        datasets = DATASETS
     elif args.dataset:
-        datasets = [(n, r) for n, r in get_datasets() if n == args.dataset]
+        datasets = [(n, r) for n, r in DATASETS if n == args.dataset]
         if not datasets:
-            print(f"Unknown dataset: {args.dataset}. Available: {DATASET_ORDER}")
+            print(f"Unknown dataset: {args.dataset}. Available: {[n for n,_ in DATASETS]}")
             sys.exit(1)
     else:
         parser.print_help()
@@ -586,7 +575,8 @@ def main():
     all_results = {}
     for name, root in datasets:
         result = verify_one_dataset(name, root, args.out, clip_len=args.clip_len,
-                                    seed=args.seed, use_rerun=use_rerun)
+                                    seed=args.seed, use_rerun=use_rerun,
+                                    num_clips=args.num_clips)
         all_results[name] = result
 
     print("\n" + "="*60)
@@ -599,9 +589,9 @@ def main():
         elif "error" in m:
             print(f"  {name:20s}  METRICS ERROR: {m['error']}")
         elif r.get("has_tracks"):
-            print(f"  {name:20s}  reproj_err={format_metric(m.get('mean_reproj_error_px'), 3, 'px')}")
+            print(f"  {name:20s}  reproj_err={m.get('mean_reproj_error_px', 'N/A'):.3f}px")
         else:
-            print(f"  {name:20s}  roundtrip_err={format_metric(m.get('mean_roundtrip_error_px'), 4, 'px')}")
+            print(f"  {name:20s}  roundtrip_err={m.get('mean_roundtrip_error_px', 'N/A'):.4f}px")
 
     Path(args.out).mkdir(parents=True, exist_ok=True)
     (Path(args.out) / "summary.json").write_text(

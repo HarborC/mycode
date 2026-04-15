@@ -20,11 +20,8 @@ def _read_exr_depth(path: Path) -> np.ndarray:
     Requires opencv-python with OpenEXR support.
     Set OPENCV_IO_ENABLE_OPENEXR=1 environment variable if needed.
 
-    MVS-Synth depth values are stored in centimeters; we convert to meters
-    by dividing by 100.
-
     Returns:
-        depth: (H, W) float32 array in meters. Invalid pixels (inf) are set to 0.
+        depth: (H, W) float32 array. Invalid pixels (inf) are set to 0.
     """
     import cv2
     dep = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
@@ -32,7 +29,6 @@ def _read_exr_depth(path: Path) -> np.ndarray:
         raise RuntimeError(f"Failed to read EXR file: {path}")
     dep = dep.astype(np.float32)
     dep[~np.isfinite(dep)] = 0.0
-    dep /= 100.0  # centimeters -> meters
     return dep
 
 
@@ -114,10 +110,12 @@ class MVSSynthAdapter(BaseAdapter):
 
     Extrinsics convention
     ---------------------
-    MVS-Synth stores **world-to-camera** (w2c) transforms.
-    Note: rotation matrices have det(R) ≈ -1 due to GTA V's left-handed
-    coordinate system. This is preserved as-is for consistency with the
-    source data.
+    MVS-Synth stores **world-to-camera** (w2c) transforms in a left-handed
+    GTA V world (X=right, Y=forward, Z=up).  The adapter converts to a
+    right-handed OpenCV-compatible world via the basis change
+    P = [[0,1,0],[0,0,-1],[1,0,0]] (new_X=forward, new_Y=down, new_Z=right).
+    After this transform det(R) ≈ +1 and the camera follows the RDF
+    (Right-Down-Forward) convention expected by rerun's Pinhole archetype.
     """
 
     dataset_name: str = "mvssynth"
@@ -129,7 +127,6 @@ class MVSSynthAdapter(BaseAdapter):
         strict: bool = True,
         verbose: bool = True,
         precompute_root: Optional[str] = None,
-        cache_dir: Optional[str] = None,
     ):
         """
         Parameters
@@ -156,12 +153,7 @@ class MVSSynthAdapter(BaseAdapter):
         # Enable OpenEXR support in OpenCV
         os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
 
-        if cache_dir is not None:
-            from datasets.index_cache import load_or_build
-            _cache_path = Path(cache_dir) / f"{self.dataset_name}_{split}.pkl"
-            self._records: list[_SequenceRecord] = load_or_build(self._build_index, _cache_path)
-        else:
-            self._records: list[_SequenceRecord] = self._build_index()
+        self._records: list[_SequenceRecord] = self._build_index()
         self._name_to_record: dict[str, _SequenceRecord] = {
             r.sequence_id: r for r in self._records
         }
@@ -189,10 +181,6 @@ class MVSSynthAdapter(BaseAdapter):
 
     def get_sequence_name(self, index: int) -> str:
         return self._records[index].sequence_id
-
-    def get_num_frames(self, sequence_name: str) -> int:
-        """Fast path: read from cached record, no image decoding."""
-        return self._get_record(sequence_name).num_frames
 
     def get_sequence_info(self, sequence_name: str) -> dict[str, Any]:
         r = self._get_record(sequence_name)
@@ -257,7 +245,8 @@ class MVSSynthAdapter(BaseAdapter):
             frame_paths.append(str(img_path))
 
             images.append(_read_rgb(img_path))
-            depths.append(_read_exr_depth(dep_path))
+            # Raw depth is in centimeters; convert to meters
+            depths.append(_read_exr_depth(dep_path) / 100.0)
 
             with open(pose_path, "r") as f:
                 pose = json.load(f)
@@ -273,47 +262,74 @@ class MVSSynthAdapter(BaseAdapter):
             intrinsics_list.append(K)
 
             E = np.array(pose["extrinsic"], dtype=np.float32)  # w2c
-            E[:3, 3] /= 100.0  # centimeters -> meters
+            # Translation is in centimeters; convert to meters
+            E[:3, 3] /= 100.0
+            # GTA V uses a left-handed world coordinate system
+            # (X=right, Y=forward, Z=up, det(R)=-1).
+            # Convert to a right-handed OpenCV-compatible world:
+            #   new_X = old_Y  (forward)
+            #   new_Y = -old_Z (down)
+            #   new_Z = old_X  (right)
+            # Basis-change matrix P (new_world = P @ old_world), det(P)=-1:
+            #   P = [[0,1,0],[0,0,-1],[1,0,0]]
+            # For a w2c matrix E=[R|t]:
+            #   E_new = E @ P^{-1} = E @ P^T
+            # det(R_new) = det(R)*det(P) = (-1)*(-1) = +1
+            # Camera axes in new world: cam_Y ≈ down, cam_Z ≈ forward (RDF).
+            P = np.array(
+                [[0, 1, 0], [0, 0, -1], [1, 0, 0]], dtype=np.float32
+            )
+            E[:3, :3] = E[:3, :3] @ P.T
             extrinsics_list.append(E)
 
         intrinsics = np.stack(intrinsics_list, axis=0)   # (T, 3, 3)
         extrinsics = np.stack(extrinsics_list, axis=0)   # (T, 4, 4) w2c
 
-        # GTA V uses a left-handed coordinate system (det(R) = -1).
-        # Convert to right-handed by flipping the world X axis:
-        #   E_rh = E_lh @ diag(-1, 1, 1, 1)  -> negates column 0 of E
-        S = np.array([-1., 1., 1., 1.], dtype=np.float32)
-        extrinsics = extrinsics * S[None, None, :]  # broadcast over (T,4,4)
-
-        # Center world coordinates around the first camera position.
-        # GTA-V maps place cameras thousands of metres from (0,0,0), which
-        # makes 3-D visualisations appear as a tiny dot near the origin.
-        # Centering is a pure rigid translation of the world frame and does
-        # not affect reprojection or relative geometry.
-        #   new_world = old_world - c0   (c0 = first camera centre)
-        #   E_new[:3,3] = E_old[:3,3] + R @ c0
-        c0 = np.linalg.inv(extrinsics[0].astype(np.float64))[:3, 3].astype(np.float32)
-        extrinsics = extrinsics.copy()
-        extrinsics[:, :3, 3] += (extrinsics[:, :3, :3] @ c0[:, None]).squeeze(-1)
-
-        # Load precomputed normals / tracks if available
+        # Load precomputed normals / tracks if available.
+        # Must happen BEFORE the origin shift so we can recover the shift vector
+        # that was used during precomputation (full-sequence frame 0), which may
+        # differ from the current sub-clip's frame 0.
         normals_out, trajs_2d_out, trajs_3d_out, valids_out, visibs_out = \
             None, None, None, None, None
         has_normals_out, has_tracks_out = False, False
+        precomputed_origin_shift: np.ndarray | None = None
         if self.precompute_root is not None:
             cache = self._load_precomputed(sequence_name, frame_indices)
             if cache is not None:
-                # Flip world X axis in normals and 3D tracks to match extrinsics,
-                # then apply the same world-centering translation.
-                normals_raw = [n.astype(np.float32) for n in cache["normals"]]
-                normals_out = [n * np.array([-1., 1., 1.], dtype=np.float32) for n in normals_raw]
-                trajs_3d_raw = cache["trajs_3d_world"].astype(np.float32)
-                trajs_3d_out = trajs_3d_raw * np.array([-1., 1., 1.], dtype=np.float32) - c0
+                normals_out     = [n.astype(np.float32) for n in cache["normals"]]
                 trajs_2d_out    = cache["trajs_2d"]
+                # trajs_3d_world was computed by compute_tracks() which received
+                # already-converted data (meters, right-handed, origin-shifted to
+                # the full-sequence frame-0 camera center).  No unit or basis
+                # conversion is needed here; the stored coords are already in the
+                # same space as the extrinsics produced below.
+                trajs_3d_out    = cache["trajs_3d_world"].astype(np.float32)
                 valids_out      = cache["valids"]
                 visibs_out      = cache["visibs"]
                 has_normals_out = True
                 has_tracks_out  = True
+                if "origin_shift" in cache:
+                    precomputed_origin_shift = np.asarray(
+                        cache["origin_shift"], dtype=np.float32
+                    ).reshape(3)
+
+        # Shift world origin to a camera center so that the scene is near the
+        # origin and rerun can auto-fit the 3-D view.
+        # Depth images live in camera space and are unaffected by this shift.
+        # For a w2c matrix E = [R | t]:  cam_center = E_inv[:3,3] = -R^T t
+        # After shifting by cam0:  new_t = t + R @ cam0  (reprojection unchanged)
+        #
+        # When precomputed tracks are available we MUST use the same cam0 that
+        # was used during precomputation (full-sequence frame 0), not the cam0
+        # of the current sub-clip, otherwise trajs_3d_world and extrinsics live
+        # in different coordinate frames.
+        if precomputed_origin_shift is not None:
+            cam0 = precomputed_origin_shift
+        else:
+            E0_inv = np.linalg.inv(extrinsics[0].astype(np.float64))
+            cam0 = E0_inv[:3, 3].astype(np.float32)
+        for i in range(len(extrinsics)):
+            extrinsics[i, :3, 3] += extrinsics[i, :3, :3] @ cam0
 
         return UnifiedClip(
             dataset_name=self.dataset_name,
@@ -346,17 +362,16 @@ class MVSSynthAdapter(BaseAdapter):
                 "depth_note": (
                     "OpenEXR float32; inf values converted to 0 (invalid/sky)"
                 ),
+                # cam0 used for origin shift (pre-shift world coords).
+                # Stored so _run_common can save it into precomputed.npz and
+                # load_clip can reuse it for sub-clips to keep trajs_3d_world
+                # in the same coordinate frame as extrinsics.
+                "origin_shift": cam0.tolist(),
             },
         )
 
     def _load_precomputed(self, sequence_name: str, frame_indices: list[int]) -> Optional[dict]:
-        """Load precomputed data for frame_indices. Prefers .h5 over .npz.
-
-        Returns None if the precomputed file is missing, doesn't cover the
-        requested frames, or if fewer than 3/4 of the requested frames have
-        any valid tracks (avoids returning near-empty track data that produces
-        blank visualisations in the verify script).
-        """
+        """Load precomputed data for frame_indices. Prefers .h5 over .npz."""
         from datasets.adapters.base import load_precomputed_fast
         path = self.precompute_root / sequence_name / "precomputed.npz"
         h5_path = path.with_suffix('.h5')
@@ -366,12 +381,6 @@ class MVSSynthAdapter(BaseAdapter):
             import h5py
             with h5py.File(h5_path, 'r') as f:
                 n = f['trajs_2d'].shape[0] if 'trajs_2d' in f else 0
-                # Check valid-track coverage before loading the full arrays.
-                if 'valids' in f and n >= max(frame_indices) + 1:
-                    valids_all = f['valids'][np.array(frame_indices)]  # (T, N)
-                    frames_with_valid = int((valids_all.any(axis=1)).sum())
-                    if frames_with_valid < len(frame_indices) * 3 // 4:
-                        return None
         else:
             n = int(np.load(path, allow_pickle=False)["num_frames"])
         if n < max(frame_indices) + 1:
@@ -468,7 +477,7 @@ class MVSSynthAdapter(BaseAdapter):
             if err > 1e-4:
                 ok = False
                 msgs.append(f"rotation matrices non-orthonormal: max ||RR^T-I||_F={err:.2e}")
-            # Note: det(R) ≈ -1 is expected for MVS-Synth (left-handed system)
+            # After the P basis-change, det(R) ≈ +1 (proper rotation)
             dets = np.linalg.det(R)
             if not np.all(np.abs(np.abs(dets) - 1.0) < 1e-4):
                 ok = False

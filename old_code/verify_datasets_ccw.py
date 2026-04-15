@@ -9,6 +9,30 @@ Usage:
     python verify_datasets.py --dataset pointodyssey
     python verify_datasets.py --all
     python verify_datasets.py --dataset kubric --rerun  # saves .rrd for rerun viewer
+    python verify_datasets.py \
+        --dataset scannet \
+        --out /mnt/ccw_1/d4rt/rerun/scannet_1 \
+        --sequence scene0030_00 \
+        --clip-len 100 \
+        --pt2d-radius 1.0 \
+        --pt3d-radius 0.008
+
+    python verify_datasets.py \
+        --dataset blendedmvs \
+        --out /mnt/ccw_1/d4rt/rerun/blendedmvs \
+        --sequence 5a3ca9cb270f0e3f14d0eddb \
+        --clip-len 30 \
+        --pt2d-radius 1.0 \
+        --pt3d-radius 0.008
+
+    python verify_datasets.py \
+        --dataset scannetpp \
+        --out /mnt/ccw_1/d4rt/rerun/scannetpp_0c5385e84b_3 \
+        --sequence 0c5385e84b \
+        --start-frame 500 \
+        --clip-len 30 \
+        --pt2d-radius 1.0 \
+        --pt3d-radius 0.008
 """
 import sys, os, json, argparse, traceback
 from pathlib import Path
@@ -18,43 +42,10 @@ from PIL import Image
 
 sys.path.insert(0, '/data1/zbf/my_dfrt')
 
-DATASET_ROOTS = {
-    "pointodyssey": Path("/data2/d4rt/datasets/PointOdyssey"),
-    "kubric": Path("/data2/d4rt/datasets/kubric"),
-    "dynamic_replica": Path("/data1/d4rt/datasets/Dynamic_Replica"),
-    "scannet": Path("/data2/d4rt/datasets/scannet/scannet"),
-    "co3dv2": Path("/data2/d4rt/datasets/Co3Dv2"),
-    "blendedmvs": Path("/data2/d4rt/datasets/BlendedMVS"),
-    "mvssynth": Path("/data2/d4rt/datasets/MVS-Synth/GTAV_1080"),
-    "tartanair": Path("/data2/d4rt/datasets/TartanAir"),
-    "vkitti2": Path("/data2/d4rt/datasets/VirtualKitti"),
-    "waymo": Path("/data2/d4rt/datasets/Waymo"),
-}
-
-DATASET_ORDER = [
-    "pointodyssey",
-    "kubric",
-    "dynamic_replica",
-    "scannet",
-    "co3dv2",
-    "blendedmvs",
-    "mvssynth",
-    "tartanair",
-    "vkitti2",
-    "waymo",
+DATASETS = [
+     ("mvssynth",  "/data2/d4rt/datasets/MVS-Synth/GTAV_1080"),
+     ("tartanair", "/data2/d4rt/datasets/TartanAir"),
 ]
-
-
-def get_datasets():
-    return [(name, str(DATASET_ROOTS[name])) for name in DATASET_ORDER]
-
-
-def get_adapter_kwargs(name: str):
-    kwargs = {"split": "train"}
-    if name == "waymo":
-        # RRD verification does not need expensive RAFT flow extraction.
-        kwargs.update({"extract_flow": False, "verbose": False})
-    return kwargs
 
 
 def project_world_to_image(pts_world, K, E):
@@ -76,6 +67,89 @@ def save_gif(frames, path, fps=8):
     imgs[0].save(path, save_all=True, append_images=imgs[1:], duration=int(1000/fps), loop=0)
 
 
+def safe_remap(img, u, v):
+    """Safely apply cv2.remap to 1D point arrays exceeding OpenCV's SHRT_MAX limit."""
+    N = len(u)
+    MAX_DIM = 30000
+    out = np.zeros(N, dtype=np.float32)
+    for i in range(0, N, MAX_DIM):
+        end = min(i + MAX_DIM, N)
+        map_x = u[i:end].astype(np.float32).reshape(1, -1)
+        map_y = v[i:end].astype(np.float32).reshape(1, -1)
+        out[i:end] = cv2.remap(
+            img, map_x, map_y,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        ).flatten()
+    return out
+
+
+def scale_intrinsics_single(K, src_w, src_h, dst_w, dst_h):
+    """Scale one 3x3 intrinsic matrix from (src_w,src_h) to (dst_w,dst_h)."""
+    K_out = K.astype(np.float32).copy()
+    sx = dst_w / src_w
+    sy = dst_h / src_h
+    K_out[0, 0] *= sx
+    K_out[0, 2] *= sx
+    K_out[1, 1] *= sy
+    K_out[1, 2] *= sy
+    return K_out
+
+
+def compute_depth_edge_mask(depth, rel_thresh=0.03, abs_thresh=0.03):
+    """Compute a conservative edge mask on a single depth map."""
+    kernel = np.ones((3, 3), dtype=np.float32)
+    d_max = cv2.dilate(depth, kernel)
+    d_min = cv2.erode(depth, kernel)
+    local_range = d_max - d_min
+    safe_d = np.maximum(depth, 1e-6)
+    edge = ((local_range / safe_d) > rel_thresh) | (local_range > abs_thresh) | (depth <= 0)
+    edge = cv2.dilate(edge.astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1)
+    return edge.astype(bool)
+
+
+def load_scannetpp_raw_depth(scene_dir: Path, frame_path: str):
+    """Load the original ScanNet++ depth PNG for a frame, in metres."""
+    frame_name = Path(frame_path).stem
+    depth_path = scene_dir / "depths" / f"{frame_name}.png"
+    d = np.asarray(Image.open(depth_path))
+    if d.ndim == 3:
+        d = d[..., 0]
+    return d.astype(np.float32) / 1000.0
+
+
+def backproject_depth_samples(depth, uv, K, E, edge_mask=None):
+    """Backproject sampled depth values at floating-point pixel coordinates."""
+    if len(uv) == 0:
+        return None, np.zeros((0,), dtype=bool)
+
+    H, W = depth.shape[:2]
+    u = uv[:, 0].astype(np.float32)
+    v = uv[:, 1].astype(np.float32)
+    z = safe_remap(depth, u, v)
+
+    valid = np.isfinite(z) & (z > 1e-3) & (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    if edge_mask is not None:
+        ui = np.clip(np.round(u).astype(np.int32), 0, W - 1)
+        vi = np.clip(np.round(v).astype(np.int32), 0, H - 1)
+        valid &= ~edge_mask[vi, ui]
+
+    if not valid.any():
+        return None, valid
+
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    x_cam = (u[valid] - cx) / fx * z[valid]
+    y_cam = (v[valid] - cy) / fy * z[valid]
+    pts_cam = np.stack([x_cam, y_cam, z[valid]], axis=1)
+
+    E_inv = np.linalg.inv(E.astype(np.float64))
+    pts_h = np.concatenate([pts_cam, np.ones((len(pts_cam), 1), dtype=np.float32)], axis=1)
+    pts3d = (E_inv @ pts_h.T).T[:, :3].astype(np.float32)
+    return pts3d, valid
+
+
 def draw_tracks_frame(img_rgb, pts_gt, pts_reproj, valid_mask, t):
     """Draw GT (green) vs reprojected (red) points on frame."""
     frame = img_rgb.copy()
@@ -94,7 +168,7 @@ def draw_tracks_frame(img_rgb, pts_gt, pts_reproj, valid_mask, t):
     return frame
 
 
-def verify_has_tracks(clip, out_dir, n_pts=200, seed=42):
+def verify_has_tracks(clip, out_dir, n_pts=200, seed=42, scene_dir=None):
     """Verify 3D->2D reprojection matches GT trajs_2d."""
     T = clip.num_frames
     H, W = clip.image_size
@@ -134,21 +208,24 @@ def verify_has_tracks(clip, out_dir, n_pts=200, seed=42):
             errors_per_frame.append(np.nan)
 
         # Depth backprojection vs trajs_3d_world
-        if clip.depths is not None and clip.depths[t] is not None and mask.any():
-            depth = clip.depths[t]  # [H,W]
-            fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
+        if mask.any():
             uv = pts2d_gt[mask]  # [M2,2]
-            xs = np.clip(np.round(uv[:, 0]).astype(int), 0, W-1)
-            ys = np.clip(np.round(uv[:, 1]).astype(int), 0, H-1)
-            z = depth[ys, xs].astype(np.float32)
-            depth_valid = np.isfinite(z) & (z > 1e-3)
-            if depth_valid.any():
-                x_cam = (xs[depth_valid] - cx) / fx * z[depth_valid]
-                y_cam = (ys[depth_valid] - cy) / fy * z[depth_valid]
-                pts_cam = np.stack([x_cam, y_cam, z[depth_valid]], axis=1)
-                E_inv = np.linalg.inv(E)
-                pts_h = np.concatenate([pts_cam, np.ones((len(pts_cam),1), dtype=np.float32)], axis=1)
-                pts3d_from_depth = (E_inv @ pts_h.T).T[:, :3]
+            if clip.metadata.get("dataset_name") == "scannetpp" and scene_dir is not None:
+                depth = load_scannetpp_raw_depth(scene_dir, clip.frame_paths[t])
+                H_d, W_d = depth.shape[:2]
+                K_d = scale_intrinsics_single(K, W, H, W_d, H_d)
+                uv_d = uv.astype(np.float32).copy()
+                uv_d[:, 0] *= W_d / W
+                uv_d[:, 1] *= H_d / H
+                edge_mask = compute_depth_edge_mask(depth)
+                pts3d_from_depth, depth_valid = backproject_depth_samples(depth, uv_d, K_d, E, edge_mask=edge_mask)
+            elif clip.depths is not None and clip.depths[t] is not None:
+                depth = clip.depths[t]
+                pts3d_from_depth, depth_valid = backproject_depth_samples(depth, uv, K, E)
+            else:
+                pts3d_from_depth, depth_valid = None, np.zeros((len(uv),), dtype=bool)
+
+            if pts3d_from_depth is not None and depth_valid.any():
                 pts3d_gt = pts3d[mask][depth_valid]
                 dist = np.linalg.norm(pts3d_from_depth - pts3d_gt, axis=1)
                 depth_3d_errors_per_frame.append(float(dist.mean()))
@@ -268,7 +345,7 @@ def _flow_to_rgb(flow: np.ndarray) -> np.ndarray:
     hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
     return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
 
-def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
+def log_clip_to_rerun(clip, name, seq, rrd_path: Path, pt2d_radius=1.5, pt3d_radius=0.01, scene_dir=None):
     """Log clip to a rerun .rrd file for offline inspection using Blueprint layout."""
     import rerun as rr
     import rerun.blueprint as rrb
@@ -344,15 +421,28 @@ def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
         ]
         rec.log("info", rr.TextDocument("\n".join(info_lines), media_type=rr.MediaType.MARKDOWN))
 
+        # ── Pre-compute union of all valid 3D world points (time-independent) ──
+        # Log once outside the time loop so all points are visible regardless
+        # of which frame is selected in the viewer timeline.
+        if has_trajs3d and clip.valids is not None:
+            all_valid_pts = []
+            for _t in range(clip.num_frames):
+                _valid = clip.valids[_t].astype(bool)
+                if clip.visibs is not None:
+                    _valid &= clip.visibs[_t].astype(bool)
+                if _valid.any():
+                    all_valid_pts.append(clip.trajs_3d_world[_t][_valid].astype(np.float32))
+            if all_valid_pts:
+                union_pts = np.concatenate(all_valid_pts, axis=0)
+                # Deduplicate (world coords are identical across frames for the same point)
+                union_pts = np.unique(union_pts, axis=0)
+                rec.log("world/pts3d_all",
+                        rr.Points3D(union_pts, colors=[0, 200, 255], radii=pt3d_radius),
+                        static=True)
+
         # ── Per-frame data ────────────────────────────────────────────────
-        # Estimate frustum_scale from world-space scene extent (camera positions or trajs)
         frustum_scale = 0.3
-        if has_trajs3d:
-            # Use median distance between consecutive camera centers as scale reference
-            centers = np.stack([np.linalg.inv(clip.extrinsics[t])[:3, 3] for t in range(clip.num_frames)])
-            scene_extent = float(np.linalg.norm(clip.trajs_3d_world[0].max(0) - clip.trajs_3d_world[0].min(0)))
-            frustum_scale = max(0.05, scene_extent * 0.05)
-        elif has_depth:
+        if has_depth:
             median_depths = [float(np.median(d[d > 0])) for d in clip.depths if np.any(d > 0)]
             if median_depths:
                 frustum_scale = float(np.median(median_depths)) * 0.1
@@ -394,32 +484,38 @@ def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
 
             if has_trajs3d and clip.trajs_2d is not None and clip.valids is not None:
                 valid = clip.valids[t].astype(bool)
+                if clip.visibs is not None:
+                    valid &= clip.visibs[t].astype(bool)
                 if valid.any():
                     pts2d_gt = clip.trajs_2d[t][valid].astype(np.float32)
                     pts3d_v = clip.trajs_3d_world[t][valid].astype(np.float32)
                     uv_reproj, reproj_valid = project_world_to_image(pts3d_v, K.astype(np.float32), E.astype(np.float32))
                     rec.log("world/camera/image/gt_pts",
-                            rr.Points2D(pts2d_gt[reproj_valid], colors=[0, 255, 0], radii=3))
+                            rr.Points2D(pts2d_gt[reproj_valid], colors=[0, 255, 0], radii=pt2d_radius))
                     rec.log("world/camera/image/reproj_pts",
-                            rr.Points2D(uv_reproj[reproj_valid], colors=[255, 0, 0], radii=2))
-                    rec.log("world/pts3d", rr.Points3D(pts3d_v, colors=[0, 180, 255], radii=0.02))
+                            rr.Points2D(uv_reproj[reproj_valid], colors=[255, 0, 0], radii=pt2d_radius * 0.67))
+                    # Per-frame colored pts: highlight currently-valid subset over the static union cloud
+                    rec.log("world/pts3d_cur",
+                            rr.Points3D(pts3d_v, colors=[255, 220, 0], radii=pt3d_radius * 1.2))
 
                     # Backproject depth at pts2d_gt positions -> orange points for comparison
-                    if has_depth and clip.depths[t] is not None:
+                    if clip.metadata.get("dataset_name") == "scannetpp" and scene_dir is not None:
+                        depth = load_scannetpp_raw_depth(scene_dir, clip.frame_paths[t])
+                        H_d, W_d = depth.shape[:2]
+                        K_d = scale_intrinsics_single(K, W, H, W_d, H_d)
+                        uv_d = pts2d_gt.copy()
+                        uv_d[:, 0] *= W_d / W
+                        uv_d[:, 1] *= H_d / H
+                        edge_mask = compute_depth_edge_mask(depth)
+                        pts3d_from_depth, dv = backproject_depth_samples(depth, uv_d, K_d, E, edge_mask=edge_mask)
+                    elif has_depth and clip.depths[t] is not None:
                         depth = clip.depths[t]
-                        fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
-                        xs = np.clip(np.round(pts2d_gt[:,0]).astype(int), 0, W-1)
-                        ys = np.clip(np.round(pts2d_gt[:,1]).astype(int), 0, H-1)
-                        z = depth[ys, xs].astype(np.float32)
-                        dv = np.isfinite(z) & (z > 1e-3)
-                        if dv.any():
-                            x_c = (xs[dv] - cx) / fx * z[dv]
-                            y_c = (ys[dv] - cy) / fy * z[dv]
-                            pts_cam = np.stack([x_c, y_c, z[dv]], axis=1)
-                            E_inv = np.linalg.inv(E.astype(np.float64))
-                            pts_h = np.concatenate([pts_cam, np.ones((len(pts_cam),1), dtype=np.float32)], axis=1)
-                            pts3d_from_depth = (E_inv @ pts_h.T).T[:, :3].astype(np.float32)
-                            rec.log("world/pts3d_from_depth", rr.Points3D(pts3d_from_depth, colors=[255, 140, 0], radii=0.02))
+                        pts3d_from_depth, dv = backproject_depth_samples(depth, pts2d_gt, K, E)
+                    else:
+                        pts3d_from_depth, dv = None, None
+
+                    if pts3d_from_depth is not None and len(pts3d_from_depth) > 0:
+                        rec.log("world/pts3d_from_depth", rr.Points3D(pts3d_from_depth, colors=[255, 140, 0], radii=pt3d_radius))
 
         # # ── 3D trajectories ───────────────────────────────────────────────
         # if has_trajs3d:
@@ -439,18 +535,7 @@ def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
     print(f"  -> rerun saved: {rrd_path}")
 
 
-def format_metric(value, precision=3, unit=""):
-    if value is None:
-        return "N/A"
-    try:
-        if np.isnan(value):
-            return "N/A"
-    except TypeError:
-        pass
-    return f"{float(value):.{precision}f}{unit}"
-
-
-def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=False):
+def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=False, sequence=None, pt2d_radius=1.5, pt3d_radius=0.01, all_frames=False, start_frame=0):
     from datasets.registry import create_adapter
     from datasets.sampling import DatasetSampler
     import random
@@ -461,32 +546,48 @@ def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=Fals
     print(f"\n{'='*60}")
     print(f"[{name}] root={root}")
 
-    root_path = Path(root)
-    if not root_path.exists():
-        result = {"error": f"dataset root not found: {root}"}
-        print(f"  ERROR: {result['error']}")
-        (out_dir / "result.json").write_text(json.dumps(result, indent=2))
-        return result
-
     try:
-        adapter = create_adapter(name=name, root=root, **get_adapter_kwargs(name))
+        adapter = create_adapter(name=name, root=root, split='train', strict=False)
     except Exception as e:
         result = {"error": f"adapter init failed: {e}"}
         print(f"  ERROR: {e}")
         (out_dir / "result.json").write_text(json.dumps(result, indent=2))
         return result
 
-    try:
-        sampler = DatasetSampler(adapter, clip_len=clip_len, sampling_mode='stride', min_frames=2)
-    except Exception as e:
-        result = {"error": f"sampler init failed: {e}"}
-        print(f"  ERROR: {e}")
-        (out_dir / "result.json").write_text(json.dumps(result, indent=2))
-        return result
-
-    print(f"  sequences: {len(sampler.valid_sequences)}")
+    print(f"  sequences: {len(adapter.list_sequences())}")
     rng = random.Random(seed)
-    seq, frame_indices = sampler.sample(rng)
+
+    if sequence is not None:
+        # Manually specified sequence — bypass sampler (its clip_len filter may reject short sequences)
+        all_sequences = adapter.list_sequences()
+        if sequence not in all_sequences:
+            print(f"  ERROR: sequence '{sequence}' not found. Available: {all_sequences[:10]}")
+            return {"error": f"sequence not found: {sequence}"}
+        seq = sequence
+        seq_info = adapter.get_sequence_info(seq)
+        total_frames = seq_info['num_frames']
+        # Use all frames if all_frames flag is set, otherwise use clip_len from start_frame
+        if all_frames:
+            frame_indices = list(range(start_frame, total_frames))
+            if start_frame > 0:
+                print(f"  sequence has {total_frames} frames, starting from frame {start_frame}, using all {len(frame_indices)} remaining frames")
+        else:
+            end_frame = start_frame + clip_len
+            if end_frame > total_frames:
+                print(f"  WARNING: requested frames [{start_frame}, {end_frame}) exceeds total {total_frames} frames. "
+                      f"Using remaining {total_frames - start_frame} frames from frame {start_frame}.")
+                end_frame = total_frames
+            frame_indices = list(range(start_frame, end_frame))
+        print(f"  sequence has {total_frames} frames, using {len(frame_indices)} frames (start={start_frame})")
+    else:
+        try:
+            sampler = DatasetSampler(adapter, clip_len=clip_len, sampling_mode='stride', min_frames=2)
+        except Exception as e:
+            result = {"error": f"sampler init failed: {e}"}
+            print(f"  ERROR: {e}")
+            (out_dir / "result.json").write_text(json.dumps(result, indent=2))
+            return result
+        seq, frame_indices = sampler.sample(rng)
 
     # For datasets with precomputed tracks, resample around ref_frame where valids are non-zero
     if name in ("co3dv2", "vkitti2"):
@@ -502,7 +603,8 @@ def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=Fals
             else:
                 ref = int(_np.load(cache_path, allow_pickle=True)["ref_frame"])
             half = clip_len // 2
-            frame_indices = list(range(max(0, ref - half), ref + half))[:clip_len]
+            num_frames = adapter.get_sequence_info(seq)['num_frames']
+            frame_indices = list(range(max(0, ref - half), min(num_frames, ref + half)))[:clip_len]
 
     print(f"  testing sequence: {seq}  frames={frame_indices[:3]}...({len(frame_indices)} total)")
 
@@ -522,7 +624,8 @@ def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=Fals
     metrics = {}
     try:
         if has_tracks:
-            metrics = verify_has_tracks(clip, out_dir)
+            scene_dir = Path(root) / seq if name == "scannetpp" else None
+            metrics = verify_has_tracks(clip, out_dir, scene_dir=scene_dir)
             me = metrics.get('mean_reproj_error_px')
             mx = metrics.get('max_reproj_error_px')
             print(f"  reproj_error: mean={me:.3f}px  max={mx:.3f}px" if me is not None
@@ -542,7 +645,8 @@ def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=Fals
 
     if use_rerun:
         try:
-            log_clip_to_rerun(clip, name, seq, out_dir / "clip.rrd")
+            scene_dir = Path(root) / seq if name == "scannetpp" else None
+            log_clip_to_rerun(clip, name, seq, out_dir / "clip.rrd", pt2d_radius, pt3d_radius, scene_dir=scene_dir)
         except Exception as e:
             print(f"  rerun ERROR: {e}")
 
@@ -568,25 +672,32 @@ def main():
     parser.add_argument("--clip-len", type=int, default=48)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-rerun", action="store_true", help="disable saving .rrd for rerun viewer")
+    parser.add_argument("--sequence", default=None, help="manually specify a sequence, e.g. apple/106_12648_23157")
+    parser.add_argument("--start-frame", type=int, default=0, help="starting frame index (only with --sequence)")
+    parser.add_argument("--all-frames", action="store_true", help="use all frames in the sequence (only with --sequence)")
+    parser.add_argument("--pt2d-radius", type=float, default=1.5, help="2D point radius in rerun viewer")
+    parser.add_argument("--pt3d-radius", type=float, default=0.01, help="3D point radius in rerun viewer")
     args = parser.parse_args()
 
     use_rerun = not args.no_rerun
 
     if args.all:
-        datasets = get_datasets()
+        datasets = DATASETS
     elif args.dataset:
-        datasets = [(n, r) for n, r in get_datasets() if n == args.dataset]
+        datasets = [(n, r) for n, r, *_ in DATASETS if n == args.dataset]
         if not datasets:
-            print(f"Unknown dataset: {args.dataset}. Available: {DATASET_ORDER}")
+            print(f"Unknown dataset: {args.dataset}. Available: {[n for n,*_ in DATASETS]}")
             sys.exit(1)
     else:
         parser.print_help()
         sys.exit(1)
 
     all_results = {}
-    for name, root in datasets:
+    for name, root, *_ in datasets:
         result = verify_one_dataset(name, root, args.out, clip_len=args.clip_len,
-                                    seed=args.seed, use_rerun=use_rerun)
+                                    seed=args.seed, use_rerun=use_rerun, sequence=args.sequence,
+                                    pt2d_radius=args.pt2d_radius, pt3d_radius=args.pt3d_radius,
+                                    all_frames=args.all_frames, start_frame=args.start_frame)
         all_results[name] = result
 
     print("\n" + "="*60)
@@ -599,9 +710,9 @@ def main():
         elif "error" in m:
             print(f"  {name:20s}  METRICS ERROR: {m['error']}")
         elif r.get("has_tracks"):
-            print(f"  {name:20s}  reproj_err={format_metric(m.get('mean_reproj_error_px'), 3, 'px')}")
+            print(f"  {name:20s}  reproj_err={m.get('mean_reproj_error_px', 'N/A'):.3f}px")
         else:
-            print(f"  {name:20s}  roundtrip_err={format_metric(m.get('mean_roundtrip_error_px'), 4, 'px')}")
+            print(f"  {name:20s}  roundtrip_err={m.get('mean_roundtrip_error_px', 'N/A'):.4f}px")
 
     Path(args.out).mkdir(parents=True, exist_ok=True)
     (Path(args.out) / "summary.json").write_text(

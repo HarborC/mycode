@@ -67,19 +67,6 @@ def _process_sequence(args: tuple) -> tuple[str, str | None]:
         )
 
         # ---- save ----
-        # Record the origin shift vector applied to extrinsics during load_clip
-        # so that load_clip can reproduce the exact same world-space frame when
-        # loading a sub-clip (frame_indices != [0..T-1]).
-        # The adapter stores the pre-shift cam0 in clip.metadata["origin_shift"].
-        raw_shift = clip.metadata.get("origin_shift")
-        if raw_shift is not None:
-            origin_shift = np.asarray(raw_shift, dtype=np.float32).reshape(3)
-        else:
-            # Fallback: extrinsics are already shifted, so cam0 is at origin.
-            # This means sub-clip loads will use their own frame-0 as origin,
-            # which is acceptable when no precomputed tracks are loaded.
-            origin_shift = np.zeros(3, dtype=np.float32)
-
         out_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             out_path,
@@ -91,7 +78,6 @@ def _process_sequence(args: tuple) -> tuple[str, str | None]:
             ref_frame       = np.array(tracks["ref_frame"],  dtype=np.int32),
             num_frames      = np.array(num_frames,           dtype=np.int32),
             num_points      = np.array(tracks["num_points"], dtype=np.int32),
-            origin_shift    = origin_shift,                  # [3] pre-shift world cam0
         )
         return seq_name, None
 

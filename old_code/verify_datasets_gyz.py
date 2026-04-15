@@ -18,43 +18,10 @@ from PIL import Image
 
 sys.path.insert(0, '/data1/zbf/my_dfrt')
 
-DATASET_ROOTS = {
-    "pointodyssey": Path("/data2/d4rt/datasets/PointOdyssey"),
-    "kubric": Path("/data2/d4rt/datasets/kubric"),
-    "dynamic_replica": Path("/data1/d4rt/datasets/Dynamic_Replica"),
-    "scannet": Path("/data2/d4rt/datasets/scannet/scannet"),
-    "co3dv2": Path("/data2/d4rt/datasets/Co3Dv2"),
-    "blendedmvs": Path("/data2/d4rt/datasets/BlendedMVS"),
-    "mvssynth": Path("/data2/d4rt/datasets/MVS-Synth/GTAV_1080"),
-    "tartanair": Path("/data2/d4rt/datasets/TartanAir"),
-    "vkitti2": Path("/data2/d4rt/datasets/VirtualKitti"),
-    "waymo": Path("/data2/d4rt/datasets/Waymo"),
-}
-
-DATASET_ORDER = [
-    "pointodyssey",
-    "kubric",
-    "dynamic_replica",
-    "scannet",
-    "co3dv2",
-    "blendedmvs",
-    "mvssynth",
-    "tartanair",
-    "vkitti2",
-    "waymo",
+DATASETS = [
+     ("mvssynth",  "/data2/d4rt/datasets/MVS-Synth/GTAV_1080"),
+     ("tartanair", "/data2/d4rt/datasets/TartanAir"),
 ]
-
-
-def get_datasets():
-    return [(name, str(DATASET_ROOTS[name])) for name in DATASET_ORDER]
-
-
-def get_adapter_kwargs(name: str):
-    kwargs = {"split": "train"}
-    if name == "waymo":
-        # RRD verification does not need expensive RAFT flow extraction.
-        kwargs.update({"extract_flow": False, "verbose": False})
-    return kwargs
 
 
 def project_world_to_image(pts_world, K, E):
@@ -260,7 +227,8 @@ def verify_no_tracks(clip, out_dir, n_pts=500, seed=42):
 def _flow_to_rgb(flow: np.ndarray) -> np.ndarray:
     """Convert [H,W,2] optical flow to an HSV-based RGB image [H,W,3] uint8."""
     import cv2
-    fx, fy = flow[..., 0], flow[..., 1]
+    flow = flow.astype(np.float32)
+    fx, fy = flow[..., 0].copy(), flow[..., 1].copy()
     mag, ang = cv2.cartToPolar(fx, fy)
     hsv = np.zeros((*flow.shape[:2], 3), dtype=np.uint8)
     hsv[..., 0] = ang * 180 / np.pi / 2          # hue  → direction
@@ -284,7 +252,7 @@ def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
         rrb.Spatial2DView(
             name="RGB & Reprojection",
             origin="world/camera/image",
-            contents=["+ $origin/**"],
+            contents=["+ $origin", "+ $origin/gt_pts", "+ $origin/reproj_pts"],
             background=[30, 30, 30],
         ),
     ]
@@ -342,21 +310,18 @@ def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
             "- **Green points**: Ground truth 2D trajectories",
             "- **Red points**: Reprojected 3D trajectories"
         ]
-        rec.log("info", rr.TextDocument("\n".join(info_lines), media_type=rr.MediaType.MARKDOWN))
+        rec.log("info", rr.TextDocument("\n".join(info_lines), media_type=rr.MediaType.MARKDOWN), static=True)
+
+        # frustum_scale: use camera trajectory span so frustums are visible relative to scene
+        cam_positions = np.stack([np.linalg.inv(clip.extrinsics[t])[:3, 3] for t in range(clip.num_frames)])
+        scene_span = float(np.linalg.norm(cam_positions.max(0) - cam_positions.min(0)))
+        if has_depth:
+            median_depths = [float(np.median(d[(d > 0) & np.isfinite(d)])) for d in clip.depths if np.any((d > 0) & np.isfinite(d))]
+            frustum_scale = float(np.median(median_depths)) * 0.05 if median_depths else max(scene_span * 0.1, 1.0)
+        else:
+            frustum_scale = max(scene_span * 0.1, 1.0)
 
         # ── Per-frame data ────────────────────────────────────────────────
-        # Estimate frustum_scale from world-space scene extent (camera positions or trajs)
-        frustum_scale = 0.3
-        if has_trajs3d:
-            # Use median distance between consecutive camera centers as scale reference
-            centers = np.stack([np.linalg.inv(clip.extrinsics[t])[:3, 3] for t in range(clip.num_frames)])
-            scene_extent = float(np.linalg.norm(clip.trajs_3d_world[0].max(0) - clip.trajs_3d_world[0].min(0)))
-            frustum_scale = max(0.05, scene_extent * 0.05)
-        elif has_depth:
-            median_depths = [float(np.median(d[d > 0])) for d in clip.depths if np.any(d > 0)]
-            if median_depths:
-                frustum_scale = float(np.median(median_depths)) * 0.1
-
         for t in range(clip.num_frames):
             rec.set_time("frame", sequence=t)
 
@@ -370,6 +335,11 @@ def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
                 translation=E_c2w[:3, 3],
                 quaternion=rr.Quaternion(xyzw=quat),
             ))
+            # Set world coordinate system based on dataset convention
+            # TartanAir uses NED (X-forward, Y-right, Z-down = FRD)
+            # Most others use Z-up (GTA V, Kubric, etc.)
+            world_coords = rr.ViewCoordinates.FRD if name == "tartanair" else rr.ViewCoordinates.RIGHT_HAND_Z_UP
+            rec.log("world", world_coords, static=True)
             rec.log("world/camera/image", rr.Pinhole(
                 image_from_camera=K, width=W, height=H,
                 image_plane_distance=frustum_scale,
@@ -381,12 +351,26 @@ def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
             rec.log("world/camera/image", rr.Image(img))
 
             if has_depth and clip.depths[t] is not None:
+                depth_img = clip.depths[t].copy()
+                depth_img[~np.isfinite(depth_img)] = 0.0  # replace inf/nan with 0
+                if not getattr(clip, 'depth_is_zdepth', clip.metadata.get('depth_is_zdepth', True)):
+                    fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
+                    _ys, _xs = np.mgrid[0:H, 0:W]
+                    scale = np.sqrt((((_xs - cx) / fx) ** 2) + (((_ys - cy) / fy) ** 2) + 1).astype(np.float32)
+                    depth_img = depth_img / scale
                 rec.log("world/camera/image/depth", rr.DepthImage(
-                    clip.depths[t], meter=1.0, colormap="Turbo", point_fill_ratio=1.0,
+                    depth_img, meter=1.0, colormap="Turbo", point_fill_ratio=1.0,
                 ))
 
             if has_normals and clip.normals[t] is not None:
-                normal_vis = ((clip.normals[t] * 0.5 + 0.5).clip(0, 1) * 255).astype(np.uint8)
+                n_world = clip.normals[t].astype(np.float32)  # (H, W, 3) world coords
+                # Transform normals from world to camera space for visualization
+                R_w2c = E[:3, :3].astype(np.float32)
+                n_cam = (n_world.reshape(-1, 3) @ R_w2c.T).reshape(n_world.shape)
+                # Flip Z for visualization: normals pointing toward camera have -Z in OpenCV
+                # convention; negating Z maps them to +Z so the vis shows white for front faces.
+                n_cam = n_cam * np.array([1., 1., -1.], dtype=np.float32)
+                normal_vis = ((n_cam * 0.5 + 0.5).clip(0, 1) * 255).astype(np.uint8)
                 rec.log("vis/normals", rr.Image(normal_vis))
 
             if has_flow and clip.flows[t] is not None:
@@ -394,32 +378,52 @@ def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
 
             if has_trajs3d and clip.trajs_2d is not None and clip.valids is not None:
                 valid = clip.valids[t].astype(bool)
+                if clip.visibs is not None:
+                    valid = valid & clip.visibs[t].astype(bool)
                 if valid.any():
                     pts2d_gt = clip.trajs_2d[t][valid].astype(np.float32)
                     pts3d_v = clip.trajs_3d_world[t][valid].astype(np.float32)
                     uv_reproj, reproj_valid = project_world_to_image(pts3d_v, K.astype(np.float32), E.astype(np.float32))
+                    # Show only points that reproject successfully (in front of camera)
                     rec.log("world/camera/image/gt_pts",
                             rr.Points2D(pts2d_gt[reproj_valid], colors=[0, 255, 0], radii=3))
                     rec.log("world/camera/image/reproj_pts",
                             rr.Points2D(uv_reproj[reproj_valid], colors=[255, 0, 0], radii=2))
-                    rec.log("world/pts3d", rr.Points3D(pts3d_v, colors=[0, 180, 255], radii=0.02))
 
-                    # Backproject depth at pts2d_gt positions -> orange points for comparison
-                    if has_depth and clip.depths[t] is not None:
-                        depth = clip.depths[t]
-                        fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
-                        xs = np.clip(np.round(pts2d_gt[:,0]).astype(int), 0, W-1)
-                        ys = np.clip(np.round(pts2d_gt[:,1]).astype(int), 0, H-1)
-                        z = depth[ys, xs].astype(np.float32)
-                        dv = np.isfinite(z) & (z > 1e-3)
-                        if dv.any():
-                            x_c = (xs[dv] - cx) / fx * z[dv]
-                            y_c = (ys[dv] - cy) / fy * z[dv]
-                            pts_cam = np.stack([x_c, y_c, z[dv]], axis=1)
-                            E_inv = np.linalg.inv(E.astype(np.float64))
-                            pts_h = np.concatenate([pts_cam, np.ones((len(pts_cam),1), dtype=np.float32)], axis=1)
-                            pts3d_from_depth = (E_inv @ pts_h.T).T[:, :3].astype(np.float32)
-                            rec.log("world/pts3d_from_depth", rr.Points3D(pts3d_from_depth, colors=[255, 140, 0], radii=0.02))
+        # ── Static accumulated world-space point cloud ────────────────────
+        # Log all frames' depth backprojections as static so they're always visible
+        all_depth_pts = []
+        all_track_pts = []
+        for t in range(clip.num_frames):
+            K = clip.intrinsics[t]
+            E = clip.extrinsics[t]
+            E_inv = np.linalg.inv(E.astype(np.float64))
+            if has_depth and clip.depths[t] is not None:
+                depth = clip.depths[t]
+                fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
+                step = max(1, min(H, W) // 80)
+                _ys, _xs = np.mgrid[0:H:step, 0:W:step]
+                _ys, _xs = _ys.ravel(), _xs.ravel()
+                _z = depth[_ys, _xs].astype(np.float32)
+                _v = (_z > 0) & np.isfinite(_z)
+                if _v.any():
+                    _xc = (_xs[_v] - cx) / fx * _z[_v]
+                    _yc = (_ys[_v] - cy) / fy * _z[_v]
+                    _ph = np.stack([_xc, _yc, _z[_v], np.ones(_v.sum(), dtype=np.float32)], axis=1)
+                    _pw = (E_inv @ _ph.T).T[:, :3].astype(np.float32)
+                    all_depth_pts.append(_pw)
+            if has_trajs3d and clip.valids is not None:
+                valid_t = clip.valids[t].astype(bool)
+                if clip.visibs is not None:
+                    valid_t = valid_t & clip.visibs[t].astype(bool)
+                if valid_t.any():
+                    all_track_pts.append(clip.trajs_3d_world[t][valid_t].astype(np.float32))
+        if all_depth_pts:
+            pts_accum = np.concatenate(all_depth_pts, axis=0)
+            rec.log("world/depth_cloud_all", rr.Points3D(pts_accum, colors=[100, 180, 255], radii=rr.Radius.ui_points(1.5)), static=True)
+        if all_track_pts:
+            trk_accum = np.concatenate(all_track_pts, axis=0)
+            rec.log("world/tracks_all", rr.Points3D(trk_accum, colors=[0, 255, 120], radii=rr.Radius.ui_points(2.0)), static=True)
 
         # # ── 3D trajectories ───────────────────────────────────────────────
         # if has_trajs3d:
@@ -439,17 +443,6 @@ def log_clip_to_rerun(clip, name, seq, rrd_path: Path):
     print(f"  -> rerun saved: {rrd_path}")
 
 
-def format_metric(value, precision=3, unit=""):
-    if value is None:
-        return "N/A"
-    try:
-        if np.isnan(value):
-            return "N/A"
-    except TypeError:
-        pass
-    return f"{float(value):.{precision}f}{unit}"
-
-
 def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=False):
     from datasets.registry import create_adapter
     from datasets.sampling import DatasetSampler
@@ -461,15 +454,8 @@ def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=Fals
     print(f"\n{'='*60}")
     print(f"[{name}] root={root}")
 
-    root_path = Path(root)
-    if not root_path.exists():
-        result = {"error": f"dataset root not found: {root}"}
-        print(f"  ERROR: {result['error']}")
-        (out_dir / "result.json").write_text(json.dumps(result, indent=2))
-        return result
-
     try:
-        adapter = create_adapter(name=name, root=root, **get_adapter_kwargs(name))
+        adapter = create_adapter(name=name, root=root, split='train')
     except Exception as e:
         result = {"error": f"adapter init failed: {e}"}
         print(f"  ERROR: {e}")
@@ -489,7 +475,7 @@ def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=Fals
     seq, frame_indices = sampler.sample(rng)
 
     # For datasets with precomputed tracks, resample around ref_frame where valids are non-zero
-    if name in ("co3dv2", "vkitti2"):
+    if name in ("co3dv2", "vkitti2", "tartanair"):
         import numpy as _np
         npz = adapter.precompute_root / seq / "precomputed.npz"
         h5 = npz.with_suffix(".h5")
@@ -502,7 +488,9 @@ def verify_one_dataset(name, root, out_base, clip_len=16, seed=0, use_rerun=Fals
             else:
                 ref = int(_np.load(cache_path, allow_pickle=True)["ref_frame"])
             half = clip_len // 2
-            frame_indices = list(range(max(0, ref - half), ref + half))[:clip_len]
+            start = max(0, ref - half)
+            end = start + clip_len
+            frame_indices = list(range(start, end))[:clip_len]
 
     print(f"  testing sequence: {seq}  frames={frame_indices[:3]}...({len(frame_indices)} total)")
 
@@ -573,11 +561,11 @@ def main():
     use_rerun = not args.no_rerun
 
     if args.all:
-        datasets = get_datasets()
+        datasets = DATASETS
     elif args.dataset:
-        datasets = [(n, r) for n, r in get_datasets() if n == args.dataset]
+        datasets = [(n, r) for n, r in DATASETS if n == args.dataset]
         if not datasets:
-            print(f"Unknown dataset: {args.dataset}. Available: {DATASET_ORDER}")
+            print(f"Unknown dataset: {args.dataset}. Available: {[n for n,_ in DATASETS]}")
             sys.exit(1)
     else:
         parser.print_help()
@@ -599,9 +587,9 @@ def main():
         elif "error" in m:
             print(f"  {name:20s}  METRICS ERROR: {m['error']}")
         elif r.get("has_tracks"):
-            print(f"  {name:20s}  reproj_err={format_metric(m.get('mean_reproj_error_px'), 3, 'px')}")
+            print(f"  {name:20s}  reproj_err={m.get('mean_reproj_error_px', 'N/A'):.3f}px")
         else:
-            print(f"  {name:20s}  roundtrip_err={format_metric(m.get('mean_roundtrip_error_px'), 4, 'px')}")
+            print(f"  {name:20s}  roundtrip_err={m.get('mean_roundtrip_error_px', 'N/A'):.4f}px")
 
     Path(args.out).mkdir(parents=True, exist_ok=True)
     (Path(args.out) / "summary.json").write_text(

@@ -209,7 +209,7 @@ class VKITTI2Adapter(BaseAdapter):
                 img_path = all_img_paths[idx]
                 img = cv2.imread(str(img_path))
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                images.append(img)  # Keep as uint8 [0, 255]
+                images.append(img.astype(np.float32) / 255.0)
                 frame_paths.append(str(img_path))
 
             if idx < len(all_depth_paths):

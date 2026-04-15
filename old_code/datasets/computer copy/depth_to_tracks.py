@@ -91,46 +91,6 @@ def _depth_boundary_mask(depth: np.ndarray, percentile: float = 85.0) -> np.ndar
 # Main function
 # --------------------------------------------------------------------------- #
 
-def _sample_frame_points(
-    depth: np.ndarray,
-    valid_mask: np.ndarray,
-    n_total: int,
-    boundary_ratio: float,
-    rng: np.random.Generator,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Sample (src_y, src_x) from one frame's valid depth pixels.
-
-    Returns arrays of shape [M] where M <= n_total.
-    """
-    n_boundary = int(n_total * boundary_ratio)
-
-    bnd_mask = _depth_boundary_mask(depth) & valid_mask
-    bnd_ys, bnd_xs = np.where(bnd_mask)
-    uni_ys, uni_xs = np.where(valid_mask)
-
-    if len(bnd_ys) >= n_boundary:
-        idx = rng.choice(len(bnd_ys), n_boundary, replace=False)
-        sel_bnd_y, sel_bnd_x = bnd_ys[idx], bnd_xs[idx]
-    else:
-        sel_bnd_y, sel_bnd_x = bnd_ys, bnd_xs
-
-    n_uni_needed = n_total - len(sel_bnd_y)
-    if len(uni_ys) >= n_uni_needed:
-        idx = rng.choice(len(uni_ys), n_uni_needed, replace=False)
-        sel_uni_y, sel_uni_x = uni_ys[idx], uni_xs[idx]
-    else:
-        sel_uni_y, sel_uni_x = uni_ys, uni_xs
-        short = n_uni_needed - len(uni_ys)
-        if short > 0 and len(uni_ys) > 0:
-            idx = rng.choice(len(uni_ys), short, replace=True)
-            sel_uni_y = np.concatenate([sel_uni_y, uni_ys[idx]])
-            sel_uni_x = np.concatenate([sel_uni_x, uni_xs[idx]])
-
-    src_y = np.concatenate([sel_bnd_y, sel_uni_y]).astype(np.int32)
-    src_x = np.concatenate([sel_bnd_x, sel_uni_x]).astype(np.int32)
-    return src_y, src_x
-
-
 def compute_tracks(
     depths: list[np.ndarray],
     intrinsics: np.ndarray,
@@ -138,40 +98,30 @@ def compute_tracks(
     num_points: int = 8000,
     boundary_ratio: float = 0.3,
     depth_consistency_thresh: float = 0.05,
-    depth_max: float = 200.0,
-    num_ref_frames: int = 8,
+    depth_max: float = 100.0,
     rng_seed: int = 42,
 ) -> dict:
     """
     Compute 2D/3D point tracks for a static scene clip (strategy A).
 
-    Points are sampled from multiple reference frames (up to ``num_ref_frames``
-    evenly spaced across the clip) so that all scene regions visible at any
-    time step receive coverage, not just those visible from one single frame.
-
     Args:
         depths:      List of T depth maps [H,W] float32. Invalid = 0/nan/inf.
         intrinsics:  [T,3,3] float32 (or [3,3] broadcast).
         extrinsics:  [T,4,4] float32 world-to-camera.
-        num_points:  Total number of source points N to sample.
+        num_points:  Number of source points N to sample.
         boundary_ratio:
             Fraction of N sampled near depth discontinuities (30%).
         depth_consistency_thresh:
             Relative depth error threshold for validity check (5%).
-        depth_max:   Depth cap in metres; pixels beyond this are ignored.
-                     Default 200 m matches TartanAir's nan-sentinel threshold.
-        num_ref_frames:
-            How many frames to distribute sampling across (default 8).
-            Points are split evenly; frames are chosen by uniform spacing.
         rng_seed:    RNG seed for reproducibility.
 
     Returns:
         dict with keys:
             trajs_2d       [T,N,2]  float32  pixel coords (x=col, y=row)
-            trajs_3d_world [T,N,3]  float32  world coords (constant per point)
+            trajs_3d_world [T,N,3]  float32  world coords (same every frame)
             valids         [T,N]    bool
             visibs         [T,N]    bool     (== valids for static scenes)
-            ref_frame      int      index of the frame with most valid pixels
+            ref_frame      int
             num_points     int      actual N (may be < requested if depth sparse)
     """
     rng = np.random.default_rng(rng_seed)
@@ -187,94 +137,87 @@ def compute_tracks(
         intrinsics = np.broadcast_to(intrinsics[None], (T, 3, 3)).copy()
 
     # ------------------------------------------------------------------ #
-    # 1. Choose reference frames: evenly spaced + the frame with most     #
-    #    valid depth pixels (kept for backward-compat ref_frame field).    #
+    # 1. Select reference frame (most valid depth pixels)                  #
     # ------------------------------------------------------------------ #
-    def _valid_mask(d):
-        return (d > 0) & np.isfinite(d) & (d < depth_max)
+    valid_counts = [int(((d > 0) & np.isfinite(d) & (d < depth_max)).sum()) for d in depths]
+    ref = int(np.argmax(valid_counts))
 
-    valid_counts = [int(_valid_mask(d).sum()) for d in depths]
-    primary_ref  = int(np.argmax(valid_counts))   # frame with most valid pixels
+    depth_ref = depths[ref]
+    K_ref = intrinsics[ref]
+    E_ref = extrinsics[ref]
 
-    n_refs = min(num_ref_frames, T)
-    if n_refs <= 1:
-        ref_frames = [primary_ref]
+    valid_ref = (depth_ref > 0) & np.isfinite(depth_ref) & (depth_ref < depth_max)
+
+    # ------------------------------------------------------------------ #
+    # 2. Sample N source points from reference frame                       #
+    # ------------------------------------------------------------------ #
+    n_boundary = int(num_points * boundary_ratio)
+    n_uniform  = num_points - n_boundary
+
+    # boundary candidates
+    bnd_mask = _depth_boundary_mask(depth_ref) & valid_ref
+    bnd_ys, bnd_xs = np.where(bnd_mask)
+
+    # uniform candidates
+    uni_ys, uni_xs = np.where(valid_ref)
+
+    # sample boundary points
+    if len(bnd_ys) >= n_boundary:
+        idx = rng.choice(len(bnd_ys), n_boundary, replace=False)
+        sel_bnd_y = bnd_ys[idx]
+        sel_bnd_x = bnd_xs[idx]
     else:
-        # Evenly spaced indices across [0, T-1], always include primary_ref.
-        # Build the spaced set first, then replace one entry with primary_ref
-        # if it is not already present, so the count stays exactly n_refs.
-        spaced = list(dict.fromkeys(np.linspace(0, T - 1, n_refs, dtype=int).tolist()))
-        if primary_ref not in spaced:
-            # Replace the spaced entry closest to primary_ref
-            closest = min(range(len(spaced)), key=lambda i: abs(spaced[i] - primary_ref))
-            spaced[closest] = primary_ref
-        ref_frames = sorted(spaced)
+        sel_bnd_y = bnd_ys
+        sel_bnd_x = bnd_xs
+
+    # sample uniform points (avoid already-selected boundary points if possible)
+    n_uni_needed = num_points - len(sel_bnd_y)
+    if len(uni_ys) >= n_uni_needed:
+        idx = rng.choice(len(uni_ys), n_uni_needed, replace=False)
+        sel_uni_y = uni_ys[idx]
+        sel_uni_x = uni_xs[idx]
+    else:
+        # not enough valid pixels — use all and allow replacement for remainder
+        sel_uni_y = uni_ys
+        sel_uni_x = uni_xs
+        short = n_uni_needed - len(uni_ys)
+        if short > 0 and len(uni_ys) > 0:
+            idx = rng.choice(len(uni_ys), short, replace=True)
+            sel_uni_y = np.concatenate([sel_uni_y, uni_ys[idx]])
+            sel_uni_x = np.concatenate([sel_uni_x, uni_xs[idx]])
+
+    src_y = np.concatenate([sel_bnd_y, sel_uni_y]).astype(np.int32)
+    src_x = np.concatenate([sel_bnd_x, sel_uni_x]).astype(np.int32)
+    N = len(src_y)   # actual number of points
+
+    src_uv = np.stack([src_x, src_y], axis=-1).astype(np.float32)   # [N,2]
+    src_d  = depth_ref[src_y, src_x].astype(np.float32)              # [N]
 
     # ------------------------------------------------------------------ #
-    # 2. Sample points from each reference frame                           #
+    # 3. Unproject to world coordinates                                    #
     # ------------------------------------------------------------------ #
-    n_per_ref   = num_points // len(ref_frames)
-    n_remainder = num_points - n_per_ref * len(ref_frames)
+    P_cam_ref = _unproject(src_uv, src_d, K_ref)   # [N,3]
 
-    all_world_pts: list[np.ndarray] = []
-
-    for i, ref in enumerate(ref_frames):
-        n_this = n_per_ref + (1 if i < n_remainder else 0)
-        depth_ref = depths[ref]
-        K_ref     = intrinsics[ref]
-        E_ref     = extrinsics[ref]
-
-        valid_ref = _valid_mask(depth_ref)
-        if not valid_ref.any():
-            continue
-
-        src_y, src_x = _sample_frame_points(
-            depth_ref, valid_ref, n_this, boundary_ratio, rng
-        )
-        if len(src_y) == 0:
-            continue
-
-        src_uv = np.stack([src_x, src_y], axis=-1).astype(np.float32)
-        src_d  = depth_ref[src_y, src_x].astype(np.float32)
-
-        P_cam = _unproject(src_uv, src_d, K_ref)           # [M,3]
-        c2w   = _c2w_from_w2c(E_ref)                        # [4,4]
-        ones  = np.ones((len(P_cam), 1), dtype=np.float32)
-        P_hom = np.concatenate([P_cam, ones], axis=-1)      # [M,4]
-        P_wld = (c2w @ P_hom.T).T[:, :3]                    # [M,3]
-        all_world_pts.append(P_wld)
-
-    if not all_world_pts:
-        # Fallback: return empty tracks (should never happen)
-        N = 0
-        return {
-            "trajs_2d":       np.zeros((T, 0, 2), dtype=np.float32),
-            "trajs_3d_world": np.zeros((T, 0, 3), dtype=np.float32),
-            "valids":         np.zeros((T, 0),    dtype=bool),
-            "visibs":         np.zeros((T, 0),    dtype=bool),
-            "ref_frame":      primary_ref,
-            "num_points":     0,
-        }
-
-    P_world = np.concatenate(all_world_pts, axis=0)   # [N,3]
-    N = len(P_world)
+    c2w_ref = _c2w_from_w2c(E_ref)                  # [4,4]
+    ones    = np.ones((N, 1), dtype=np.float32)
+    P_hom   = np.concatenate([P_cam_ref, ones], axis=-1)  # [N,4]
+    P_world = (c2w_ref @ P_hom.T).T[:, :3]           # [N,3]
 
     # ------------------------------------------------------------------ #
-    # 3. Project into every frame                                          #
+    # 4. Project into every frame                                          #
     # ------------------------------------------------------------------ #
-    ones      = np.ones((N, 1), dtype=np.float32)
-    P_hom_all = np.concatenate([P_world, ones], axis=-1)   # [N,4]
-
-    trajs_2d = np.zeros((T, N, 2), dtype=np.float32)
-    valids   = np.zeros((T, N),    dtype=bool)
+    trajs_2d   = np.zeros((T, N, 2), dtype=np.float32)
+    valids     = np.zeros((T, N),    dtype=bool)
 
     for t in range(T):
         E_t = extrinsics[t]
         K_t = intrinsics[t]
 
         # world → camera
-        P_cam_t    = (E_t @ P_hom_all.T).T[:, :3]          # [N,3]
-        uv_t, z_t  = _project(P_cam_t, K_t)                 # [N,2], [N]
+        P_hom_t  = np.concatenate([P_world, ones], axis=-1)   # [N,4]
+        P_cam_t  = (E_t @ P_hom_t.T).T[:, :3]                 # [N,3]
+
+        uv_t, z_t = _project(P_cam_t, K_t)                    # [N,2], [N]
 
         # in-bounds check
         in_bounds = (
@@ -284,9 +227,9 @@ def compute_tracks(
         )
 
         # depth consistency check (nearest-neighbour sample)
-        depth_t   = depths[t]
-        px        = np.clip(np.round(uv_t[:, 0]).astype(np.int32), 0, W - 1)
-        py        = np.clip(np.round(uv_t[:, 1]).astype(np.int32), 0, H - 1)
+        depth_t = depths[t]
+        px = np.clip(np.round(uv_t[:, 0]).astype(np.int32), 0, W - 1)
+        py = np.clip(np.round(uv_t[:, 1]).astype(np.int32), 0, H - 1)
         sampled_d = depth_t[py, px]
         depth_ok  = (
             (sampled_d > 0)
@@ -295,8 +238,9 @@ def compute_tracks(
             & (np.abs(sampled_d - z_t) / np.maximum(z_t, 1e-6) < depth_consistency_thresh)
         )
 
-        valids[t]   = in_bounds & depth_ok
-        trajs_2d[t] = uv_t
+        valid_t = in_bounds & depth_ok
+        trajs_2d[t]  = uv_t
+        valids[t]    = valid_t
 
     trajs_3d_world = np.broadcast_to(P_world[None], (T, N, 3)).copy()
     visibs = valids.copy()   # static scene: no occlusion modelling
@@ -306,6 +250,6 @@ def compute_tracks(
         "trajs_3d_world": trajs_3d_world,
         "valids":         valids,
         "visibs":         visibs,
-        "ref_frame":      primary_ref,
+        "ref_frame":      ref,
         "num_points":     N,
     }

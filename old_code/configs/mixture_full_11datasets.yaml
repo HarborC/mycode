@@ -1,0 +1,70 @@
+# 完整版配置（11个数据集 - 论文原始设置）
+mode: mixture
+datasets:
+  # 有轨迹数据集（权重更高）
+  - name: pointodyssey
+    root: /data1/zbf/PointOdyssey_fast
+    weight: 0.25
+  - name: kubric
+    root: /data2/d4rt/datasets/kubric
+    weight: 0.15
+  - name: dynamic_replica
+    root: /data1/d4rt/datasets/Dynamic_Replica
+    weight: 0.10
+    val_split: valid
+
+  # 静态重建数据集
+  - name: scannet
+    root: /data2/d4rt/datasets/scannet/scannet
+    weight: 0.10
+  - name: co3dv2
+    root: /data2/d4rt/datasets/Co3Dv2
+    weight: 0.10
+  - name: blendedmvs
+    root: /data2/d4rt/datasets/BlendedMVS
+    weight: 0.08
+  - name: mvssynth
+    root: /data2/d4rt/datasets/MVS-Synth/GTAV_1080
+    weight: 0.07
+  # - name: tartanair
+  #   root: /data2/d4rt/datasets/TartanAir
+  #   weight: 0.06
+  - name: vkitti2
+    root: /data2/d4rt/datasets/VirtualKitti
+    weight: 0.09
+  # - name: waymo
+  #   root: /data2/d4rt/datasets/Waymo
+  #   weight: 0.04
+  #   val_split: training
+
+clip_len: 48
+img_size: 256
+num_queries: 2048
+use_augs: true
+boundary_ratio: 0.3
+t_tgt_eq_t_cam_ratio: 0.4
+seed: 42
+index_cache_dir: /data1/zbf/my_dfrt/.index_cache
+
+
+
+
+# 数据集	大小
+# Co3Dv2	5.4T
+# Dynamic_Replica
+
+
+
+# kubric	364G
+# PointOdyssey_fast	292G
+# PointOdyssey	259G
+# VirtualKitti	242G
+# MVS-Synth	178G
+# BlendedMVS	108G
+# scannet	68G
+# TartanAir	18G
+# Waymo	5.5G
+
+
+# PointOdyssey
+# Failed to read normal: /data2/d4rt/datasets/PointOdyssey/train/cab_h_bench_ego1/normals/normal_00192.jpg
